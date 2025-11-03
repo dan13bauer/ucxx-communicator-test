@@ -15,10 +15,11 @@ Receiver::Receiver(
     : CommElement(communicator),
       host_(host),
       port_(port),
-      state_(ReceiverState::Created),
       key_("receiver_" + std::to_string(receiverId)),
       initialValue_(receiverId),
-      taskIdHash_(fnv1a_32(key_)) {}
+      taskIdHash_(fnv1a_32(key_)) {
+        setState(ReceiverState::Created);
+      }
 
 // static
 std::shared_ptr<Receiver> Receiver::create(
@@ -33,6 +34,12 @@ std::shared_ptr<Receiver> Receiver::create(
 
 void Receiver::process() {
   std::cout << "+ Receiver::process state " << receiverStateNames_[state_] << std::endl;
+  if (closed_) {
+    // Driver thread called closed
+    cleanUp();
+    return;
+  }
+
   switch (state_) {
     case ReceiverState::Created: {
       // Get the endpoint.
@@ -41,12 +48,14 @@ void Receiver::process() {
       auto epRef = communicator_->assocEndpointRef(selfPtr, hp);
       if (epRef) {
         setEndpoint(epRef);
+        setStateIf(
+            ReceiverState::Created, ReceiverState::WaitingForHandshakeComplete);
         sendHandshake();
       } else {
         // connection failed.
         std::cerr << "Failed to connect to " << host_ << ":"
                   << std::to_string(port_) << std::endl;
-        close();
+        setState(ReceiverState::Done);
       }
       communicator_->addToWorkQueue(getSelfPtr());
     } break;
@@ -56,7 +65,8 @@ void Receiver::process() {
     case ReceiverState::ReadyToReceive:
       // change state before calling getMetadata since immediate upcalls in
       // getMetadata will also change state.
-      state_ = ReceiverState::WaitingForMetadata;
+      setStateIf(
+          ReceiverState::ReadyToReceive, ReceiverState::WaitingForMetadata);
       getMetadata();
       break;
     case ReceiverState::WaitingForMetadata:
@@ -66,30 +76,45 @@ void Receiver::process() {
       // Waiting for data is handled by an upcall from UCXX. Nothing to do.
       break;
     case ReceiverState::Done:
-      // unregister.
-      close();
-      //communicator_->unregister(getSelfPtr());
-      exit(0); // Just For Testing
+      // We need to call clean-up in this thread to remove any state
+      cleanUp();
       break;
   }
-   //std::cout << "- Receiver::process state " << state_ << std::endl;
 }
 
-void Receiver::close(bool endpointClosing) {
-  std::cout << "+ Receiver::close" << std::endl;
-  if (state_ != ReceiverState::Done) {
-    std::cerr << "Close receiver to remote " << key_ << " in error!"
-              << std::endl;
-  } else {
-    std::cerr << "Close receiver to remote " << key_ << "." << std::endl;
+void Receiver::cleanUp() {
+  uint32_t value = static_cast<uint32_t>(getState());
+  if (value != static_cast<uint32_t>(ReceiverState::Done)) {
+    // Unexpected cleanup
+    std::cout << "In Receiver::cleanUp state == " << value << std::endl;
   }
 
-  if (endpointRef_ && !endpointClosing) {
-    endpointRef_->removeCommunicator(getSelfPtr());
+  if (!request_->isCompleted()) {
+    request_->cancel();
   }
-  communicator_->unregister(getSelfPtr());
-  state_ = ReceiverState::Done;
-  std::cout << "- Receiver::close" << std::endl;
+
+  if (endpointRef_) {
+    endpointRef_->removeCommElem(getSelfPtr());
+    endpointRef_ = nullptr;
+  }
+  if (communicator_) {
+    communicator_->unregister(getSelfPtr());
+  }
+}
+
+
+void Receiver::close() {
+  std::cout << "+ Receiver::close" << std::endl;
+  bool expected = false;
+  bool desired = true;
+  if (!closed_.compare_exchange_strong(expected, desired)) {
+    return; // already closed.
+  }
+  std::cerr << "Close receiver to remote " << key_ << "." << std::endl;
+
+  //  Let the Communicator progress thread do the actual clean-up
+  setState(ReceiverState::Done);
+  communicator_->addToWorkQueue(getSelfPtr());
 }
 
 std::string Receiver::toString() {
@@ -98,12 +123,13 @@ std::string Receiver::toString() {
   return out.str();
 }
 
-void Receiver::setEndpoint(std::shared_ptr<EndpointRef> endpointRef) {
-  endpointRef_ = std::move(endpointRef);
-}
-
 std::shared_ptr<Receiver> Receiver::getSelfPtr() {
   return shared_from_this();
+}
+
+
+void Receiver::setEndpoint(std::shared_ptr<EndpointRef> endpointRef) {
+  endpointRef_ = std::move(endpointRef);
 }
 
 void Receiver::sendHandshake() {
@@ -115,7 +141,6 @@ void Receiver::sendHandshake() {
             << handshakeReq->initialValue << " to server" << std::endl;
 
   // Create the handshake which will register client's existence with the server
-  state_ = ReceiverState::WaitingForHandshakeComplete;
   ucxx::AmReceiverCallbackInfo info(
       communicator_->kAmCallbackOwner, communicator_->kAmCallbackId);
   request_ = endpointRef_->endpoint_->amSend(
@@ -130,33 +155,27 @@ void Receiver::sendHandshake() {
           std::placeholders::_1,
           std::placeholders::_2),
       handshakeReq);
-
-  request_->checkError();
-  auto s = request_->getStatus();
-  if (s != UCS_INPROGRESS && s != UCS_OK) {
-    std::cerr << "Error in sendHandshake " << ucs_status_string(s)
-              << " failed for task: " << key_ << std::endl;
-    close();
-  }
 }
 
 void Receiver::onHandshake(ucs_status_t status, std::shared_ptr<void> arg) {
   if (status != UCS_OK) {
     std::string errorMsg = fmt::format(
-        "Failed to send handshake ot host {}:{}, task {}: {}",
+        "Failed to send handshake to host {}:{}, task {}: {}",
         host_,
         port_,
         key_,
         ucs_status_string(status));
     std::cerr << errorMsg << std::endl;
-    close();
+    setState(ReceiverState::Done);
   } else {
     std::cout << toString() << "+ onHandshake " << ucs_status_string(status)
               << std::endl;
-    state_ = ReceiverState::ReadyToReceive;
-    // more work to do
-    communicator_->addToWorkQueue(getSelfPtr());
+    setStateIf(
+        ReceiverState::WaitingForHandshakeComplete,
+        ReceiverState::ReadyToReceive);
   }
+  // more work to do
+  communicator_->addToWorkQueue(getSelfPtr());
 }
 
 void Receiver::getMetadata() {
@@ -181,14 +200,6 @@ void Receiver::getMetadata() {
           std::placeholders::_1,
           std::placeholders::_2),
       metadataReq);
-
-  request_->checkError();
-  auto s = request_->getStatus();
-  if (s != UCS_INPROGRESS && s != UCS_OK) {
-    std::cout << "Error in getMetadata, receive metadata "
-              << ucs_status_string(s) << " failed for task: " << key_
-              << std::endl;
-  }
 }
 
 void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
@@ -200,7 +211,8 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
         key_,
         ucs_status_string(status));
     std::cerr << errorMsg << std::endl;
-    close();
+    setState(ReceiverState::Done);
+    communicator_->addToWorkQueue(getSelfPtr());
   } else {
     CHECK(arg != nullptr, "Didn't get metadata");
 
@@ -215,12 +227,13 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
 
     if (ptr->metadata.atEnd) {
       // It seems that all data has been transferred
-      std::cout << toString() << "There is no more data to transfer!"
+      atEnd_ = true;
+      std::cout << "There is no more data to transfer for " << toString()
                 << std::endl;
       // Let the statement decide the final action
-      state_ = ReceiverState::Done;
+      setStateIf(ReceiverState::WaitingForMetadata, ReceiverState::Done);
       communicator_->addToWorkQueue(getSelfPtr());
-      //close();
+      // jump out of this function.
       return;
     }
 
@@ -228,26 +241,34 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
     // Get a stream from the global stream pool
 
     auto stream = cudf::get_default_stream();
-
     try {
       ptr->dataBuf = std::make_unique<rmm::device_buffer>(
           ptr->metadata.dataSizeBytes, stream);
     } catch (const rmm::bad_alloc& e) {
       std::cerr << "!!! RMM bad_alloc: " << e.what() << "\n";
-      state_ = ReceiverState::Done;
+      setState(ReceiverState::Done);
       communicator_->addToWorkQueue(getSelfPtr());
       return;
     } catch (const rmm::cuda_error& e) {
       std::cerr << "!!! General allocation exception: " << e.what() << "\n";
     }
 
+    // sync after allocating.
+    stream.synchronize();
+
+    std::cout << "Allocated " << ptr->metadata.dataSizeBytes
+            << " bytes of device memory" << std::endl;
     // Initiate the transfer of the actual data from GPU-2-GPU
     uint64_t dataTag = getDataTag(taskIdHash_, sequenceNumber_);
     std::cout << toString()
               << " waiting for data for chunk: " << sequenceNumber_
               << " using tag: " << std::hex << dataTag << std::dec << std::endl;
 
-    state_ = ReceiverState::WaitingForData;
+    if (!setStateIf(
+            ReceiverState::WaitingForMetadata, ReceiverState::WaitingForData)) {
+      std::cerr << "onMetadata Invalid previous state " << std::endl;
+      return;
+    }
     request_ = endpointRef_->endpoint_->tagRecv(
         ptr->dataBuf->data(),
         ptr->metadata.dataSizeBytes,
@@ -261,14 +282,6 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
             std::placeholders::_2),
         ptr // DataAndMetadata
     );
-
-    request_->checkError();
-    auto s = request_->getStatus();
-    if (s != UCS_INPROGRESS && s != UCS_OK) {
-      std::cout << "Error in onMetadata, receive data " << ucs_status_string(s)
-                << " failed for task: " << key_ << std::endl;
-      close();
-    }
   }
 }
 
@@ -281,12 +294,13 @@ void Receiver::onData(ucs_status_t status, std::shared_ptr<void> arg) {
         key_,
         ucs_status_string(status));
     std::cout << toString() << errorMsg << std::endl;
-    close();
+    setState(ReceiverState::Done);
   } else {
     std::cout << toString() << "+ onData " << ucs_status_string(status)
               << "got chunk: " << sequenceNumber_ << std::endl;
 
     this->sequenceNumber_++;
+
     std::shared_ptr<DataAndMetadata> ptr =
         std::static_pointer_cast<DataAndMetadata>(arg);
 
@@ -294,10 +308,29 @@ void Receiver::onData(ucs_status_t status, std::shared_ptr<void> arg) {
         std::make_unique<cudf::packed_columns>(
             std::move(ptr->metadata.cudfMetadata), std::move(ptr->dataBuf));
     dumpValues(std::move(columns), ptr->metadata);
-    state_ = ReceiverState::ReadyToReceive;
-    communicator_->addToWorkQueue(getSelfPtr());
+    setStateIf(ReceiverState::WaitingForData, ReceiverState::ReadyToReceive);
   }
+  communicator_->addToWorkQueue(getSelfPtr());
 }
+
+bool Receiver::setStateIf(
+    Receiver::ReceiverState expected,
+    Receiver::ReceiverState desired) {
+  ReceiverState exp = expected;
+  // since spurious failures can happen even if state_ == expected, we need
+  // to do this in a loop.
+  while (!state_.compare_exchange_strong(
+      exp, desired, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+    if (exp != expected) {
+      // no spurious failure, state isn't what we've expected.
+      return false;
+    }
+    // spurious failure.
+    exp = expected; // reset for the next try
+  }
+  return true;
+}
+
 
 void Receiver::dumpValues(
     std::unique_ptr<cudf::packed_columns> columns,

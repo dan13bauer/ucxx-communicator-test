@@ -18,12 +18,12 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
 
   void process() override;
 
-  void close(bool endpointClosing = false) override;
+  void close() override;
 
   std::string toString();
 
  private:
-  enum class SenderState : uint32_t {
+  enum class ServerState : uint32_t {
     Created,
     ReadyToTransfer,
     WaitingForDataFromQueue,
@@ -47,11 +47,26 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
   /// @brief Completion handler after data has been sent.
   void sendComplete(ucs_status_t status, std::shared_ptr<void> arg);
 
+  /// @brief Sets the new state of this exchange server using
+  /// sequential consistency.
+  /// @param newState the new state of the CudfExchangeServer.
+  void setState(ServerState newState) {
+    state_.store(newState, std::memory_order_seq_cst);
+  }
+
+  /// @brief Returns the state.
+  ServerState getState() {
+    return state_.load(std::memory_order_seq_cst);
+  }
+
+
   std::string key_; // The unique identifier of the connected receiver.
   uint32_t keyHash_; // A hash of above, used to create unique tags.
 
-  SenderState state_;
+  std::atomic<ServerState> state_;
   std::unique_ptr<cudf::packed_columns> dataPtr_;
+  std::atomic<bool> closed_{false};
+
   uint32_t sequenceNumber_{0};
   HandshakeMsg handshake_;
 
@@ -61,6 +76,10 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
   // and must therefore exist until the upcall is done.
   std::shared_ptr<ucxx::Request> metaRequest_{nullptr};
   std::shared_ptr<ucxx::Request> dataRequest_{nullptr};
+
+  std::chrono::time_point<std::chrono::high_resolution_clock> sendStart_;
+  std::size_t bytes_;
+
 
   // For testing only:
   std::unique_ptr<cudf::packed_columns> makePackedColumns(

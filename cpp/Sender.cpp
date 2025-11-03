@@ -20,9 +20,10 @@ Sender::Sender(
     : CommElement(communicator, endpointRef),
       key_(key),
       keyHash_(fnv1a_32(key)),
-      state_(SenderState::Created),
       numExchanges_(FLAGS_num_chunks),
-      initialValue_(initialValue) {}
+      initialValue_(initialValue) {
+          setState(ServerState::Created);
+      }
 
 // static
 std::shared_ptr<Sender> Sender::create(
@@ -37,11 +38,13 @@ std::shared_ptr<Sender> Sender::create(
 
 void Sender::process() {
   switch (state_) {
-    case SenderState::Created:
-      state_ = SenderState::ReadyToTransfer;
+    case ServerState::Created:
+      setState(ServerState::ReadyToTransfer);
       communicator_->addToWorkQueue(getSelfPtr());
       break;
-    case SenderState::ReadyToTransfer:
+    case ServerState::ReadyToTransfer:
+      setState(ServerState::WaitingForDataFromQueue);
+
       // Get the data and store it in the dataPtr_;
       // FIXME: Fetch data from CudfQueueManager instead of generating it here.
       // continue, until we reach the end.
@@ -50,41 +53,38 @@ void Sender::process() {
       } else {
         dataPtr_ = nullptr; // signal that we are at the end.
       }
-      state_ = SenderState::DataReady;
+            this->setState(ServerState::DataReady);
       communicator_->addToWorkQueue(getSelfPtr());
       break;
-    case SenderState::WaitingForDataFromQueue:
+    case ServerState::WaitingForDataFromQueue:
       // Waiting for data is handled by an upcall from the data queue. Nothing
       // to do
       break;
-    case SenderState::DataReady:
+    case ServerState::DataReady:
       sendData();
       break;
-    case SenderState::WaitingForSendComplete:
+    case ServerState::WaitingForSendComplete:
       // Waiting for send complete is handled by an upcall from UCXX. Nothing to
       // do
       break;
-    case SenderState::Done:
-      // unregister.
-      communicator_->unregister(getSelfPtr());
+    case ServerState::Done:
+      close();
+      if (endpointRef_) {
+        endpointRef_->removeCommElem(getSelfPtr());
+        endpointRef_ = nullptr;
+      }
       break;
   };
 }
 
-void Sender::close(bool endpointClosing) {
-   std::cout << "+ Sender::close" << std::endl;
-  if (state_ != SenderState::Done) {
-    std::cerr << "Close sender to remote " << key_ << " in error !" << std::endl;
-  } else {
-    std::cerr << "Close sender to remote " << key_ << "." << std::endl;
+void Sender::close() {
+  bool expected = false;
+  bool desired = true;
+  if (!closed_.compare_exchange_strong(expected, desired)) {
+    return; // already closed.
   }
-  if (endpointRef_ && ! endpointClosing) {
-    endpointRef_->removeCommunicator(getSelfPtr());
-  }
-  std::cout << "Before unregister Sender" << std::endl;
+  std::cout << "Close Sender to remote " << key_;
   communicator_->unregister(getSelfPtr());
-  state_ = SenderState::Done;
-  std::cout << "- Sender::close" << std::endl;
 }
 
 std::string Sender::toString() {
@@ -120,34 +120,37 @@ void Sender::sendData() {
   auto [serializedMetadata, serMetaSize] = metadataMsg->serialize();
 
   // send metadata, no callback needed.
-  uint64_t metadataTag = getMetadataTag(this->keyHash_, this->sequenceNumber_);
+  uint64_t metadataTag =
+      getMetadataTag(this->keyHash_, this->sequenceNumber_);
   metaRequest_ = endpointRef_->endpoint_->tagSend(
       serializedMetadata.get(),
       serMetaSize,
       ucxx::Tag{metadataTag},
       false,
-      [tid = key_, metadataTag](
+      [tid = key_, metadataTag, this](
           ucs_status_t status, std::shared_ptr<void> arg) {
-        std::cout << "metadata successfully sent to " << tid
+        if (status == UCS_OK) {
+          std::cout << "metadata successfully sent to " << tid
                   << " with tag: " << std::hex << metadataTag << std::endl;
+        } else {
+          std::cerr << "Error in sendData, send metadata "
+                  << ucs_status_string(status) << " failed for task: " << tid << std::endl;
+          this->setState(ServerState::Done);
+          this->communicator_->addToWorkQueue(getSelfPtr());
+        }
       },
       serializedMetadata);
- 
-  metaRequest_->checkError();
-  auto s = metaRequest_->getStatus();
-  if (s != UCS_INPROGRESS && s != UCS_OK) {
-    std::cout << "Error in sendData, send metadata " << ucs_status_string(s)
-              << " failed for task: " << key_ << std::endl;
-  }
 
   // send the data chunk (if any)
   if (dataPtr_) {
+      sendStart_ = std::chrono::high_resolution_clock::now();
+      bytes_ = dataPtr_->gpu_data->size();
     std::cout << "Sending rmm::buffer: " << std::hex << dataPtr_->gpu_data.get()
               << " pointing to device memory: " << std::hex
               << dataPtr_->gpu_data->data() << std::dec << " to task " << key_
               << ":" << this->sequenceNumber_ << std::endl;
 
-    state_ = SenderState::WaitingForSendComplete;
+    setState(ServerState::WaitingForSendComplete);
     uint64_t dataTag = getDataTag(this->keyHash_, this->sequenceNumber_);
     dataRequest_ = endpointRef_->endpoint_->tagSend(
         dataPtr_->gpu_data->data(),
@@ -159,51 +162,43 @@ void Sender::sendData() {
             this,
             std::placeholders::_1,
             std::placeholders::_2));
-
-
-    if (dataRequest_ == nullptr) {
-      std::cout << "dataRequest is NULL" << std::endl;
-
-    }
-    dataRequest_->checkError();
-    s = dataRequest_->getStatus();
-    if (s != UCS_INPROGRESS && s != UCS_OK) {
-      std::cout << "Error in sendData, send rmm::buffer "
-                << ucs_status_string(s) << " failed for task: " << key_
-                << std::endl;
-      close();
-    }
   } else {
     // Data pointer is null, so no more data will be coming.
     std::cout << "Finished transferring partition for task " << key_
               << std::endl;
-    state_ = SenderState::Done;
-    close();
+      setState(ServerState::Done);
+      communicator_->addToWorkQueue(getSelfPtr());
   }
 }
 
-void Sender::sendComplete(ucs_status_t status, std::shared_ptr<void> arg) {
-
-  std::cout << "+ Sender::sendComplete" << std::endl;
+void Sender::sendComplete(
+  ucs_status_t status,
+  std::shared_ptr<void> arg) {
   if (status == UCS_OK) {
     CHECK(dataPtr_ != nullptr, "dataPtr_ is null");
+
+        auto end = std::chrono::high_resolution_clock::now();
+    auto duration = end - sendStart_;
+    auto micros =
+        std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+    auto throughput = bytes_ / micros;
+
+    std::cout << "duration: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(duration)
+                   .count()
+            << " ms " << std::endl;
+    std::cout << "throughput: " << throughput << " MByte/s" << std::endl;
+
     this->sequenceNumber_++;
     dataPtr_.reset(); // release memory.
-    state_ = SenderState::ReadyToTransfer;
-    communicator_->addToWorkQueue(getSelfPtr());
+    std::cout << "Releasing dataPtr_ in sendComplete." << std::endl;
+    setState(ServerState::ReadyToTransfer);
   } else {
-    std::cout << "Error in sendComplete, send complete "
+    std::cerr << "Error in sendComplete, send complete "
               << ucs_status_string(status) << std::endl;
-
-    if (status == UCS_ERR_CONNECTION_RESET) {
-      // Don't close as this will handle elsewhere
-    //close(true);
-    }
-    else {
-      close();
-    }
+    setState(ServerState::Done);
   }
-  std::cout << "- Sender::sendComplete" << std::endl;
+  communicator_->addToWorkQueue(getSelfPtr());
 }
 
 // ---- for testing only ---

@@ -40,10 +40,20 @@ std::shared_ptr<Communicator> Communicator::getInstance() {
   instance->listenerCallback(conn_request);
 }
 
+Communicator::~Communicator() {
+  listener_.reset();
+  auto req = worker_->flush();
+  worker_->progressWorkerEvent(100);
+  worker_.reset();
+  context_.reset();
+  std::cout << "Communicator destructed" << std::endl;
+}
+
 /// @brief Run doesn't return until stop() is called.
 /// All operations of the communicator will be carried out in the thread
 /// that calls run.
 void Communicator::run() {
+  running_.store(true);
   // Force CUDA context creation
   cudaFree(0);
 
@@ -63,20 +73,25 @@ void Communicator::run() {
   worker_->registerAmReceiverCallback(info, &Acceptor::cStyleAMCallback);
 
   std::cout << "Communicator running." << std::endl;
-
-  running_.store(true);
   while (running_) {
-    // wait for progress.
-    worker_->progressWorkerEvent(0);
-
-    // process the work queue. Make sure that communication is progressed
-    // after each call to a comms element, otherwise we will deadlock.
-    while (!workQueue_.empty()) {
-      auto comms = workQueue_.pop();
-      comms->process();
+    try {
+      // wait for progress.
       worker_->progressWorkerEvent(0);
+
+      // process the work queue. Make sure that communication is progressed
+      // after each call to a comms element, otherwise we will deadlock.
+      while (!workQueue_.empty()) {
+        auto comms = workQueue_.pop();
+        comms->process();
+        worker_->progressWorkerEvent(0);
+      }
+    } catch (ucxx::IOError& e) {
+      std::cerr << "In Communicator main loop UCXX Exception: " << e.what()
+                << std::endl;
+      throw e;
     }
   }
+  std::cout << "Communicator stopping." << std::endl;
 }
 
 /// @brief Stops the communicator, called from an outside thread.
@@ -84,7 +99,7 @@ void Communicator::stop() {
   running_.store(false);
 }
 
-void Communicator::registerComms(std::shared_ptr<CommElement> comms) {
+void Communicator::registerCommElement(std::shared_ptr<CommElement> comms) {
   std::lock_guard<std::mutex> lock(elemMutex_);
   auto ret = elements_.insert(comms);
   CHECK(ret.second, "CommElement already registered!");
@@ -93,11 +108,17 @@ void Communicator::registerComms(std::shared_ptr<CommElement> comms) {
 }
 
 void Communicator::addToWorkQueue(std::shared_ptr<CommElement> comms) {
+  if (!comms) {
+    return;
+  }
   workQueue_.push(comms);
 }
 
 void Communicator::unregister(std::shared_ptr<CommElement> comms) {
   std::lock_guard<std::mutex> lock(elemMutex_);
+  if (!comms) {
+    return;
+  }
   workQueue_.erase(comms);
   elements_.erase(comms);
 }
@@ -108,7 +129,7 @@ std::shared_ptr<EndpointRef> Communicator::assocEndpointRef(
   auto it = endpoints_.find(hostPort);
   if (it != endpoints_.end()) {
     std::shared_ptr<EndpointRef> ep = it->second;
-    ep->addCommunicator(comms);
+    ep->addCommElem(comms);
     return ep;
   }
   // endpoint doesn't exist. Need to connect. Enable error handling.
@@ -117,12 +138,30 @@ std::shared_ptr<EndpointRef> Communicator::assocEndpointRef(
   std::shared_ptr<EndpointRef> epRef = nullptr;
   if (ep != nullptr) {
     epRef = std::make_shared<EndpointRef>(ep);
-    epRef->addCommunicator(comms);
+    epRef->addCommElem(comms);
     // register on close callback.
     ep->setCloseCallback(EndpointRef::onClose, epRef);
     endpoints_.insert(std::pair{hostPort, epRef});
   }
   return epRef;
+}
+
+void Communicator::removeEndpointRef(std::shared_ptr<EndpointRef> ep) {
+  std::cout << "In Communicator::removeEndpointRef for Communicator with port = "
+          << Communicator::getInstance()->port_ << std::endl;
+  std::string worker_info = ep->endpoint_->getWorker()->getInfo();
+  if (ep->endpoint_ && ep->endpoint_->isAlive()) {
+    std::cout << "In Communicator::removeEndpointRef call closeBlocking" << std::endl;
+    ep->endpoint_->closeBlocking();
+  }
+  for (auto it = endpoints_.begin(); it != endpoints_.end();) {
+    if (it->second == ep) {
+      it = endpoints_.erase(it); // erase returns the next iterator
+    } else {
+      ++it;
+    }
+  }
+  std::cout << "- Communicator::removeEndpointRef" << std::endl;;
 }
 
 /// @brief The callback method that is invoked when a client connects.

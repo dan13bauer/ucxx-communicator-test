@@ -32,10 +32,10 @@ void Acceptor::cStyleAMCallback(
       handshakePtr->initialValue);
 
   // Add this sender to the endpoint reference.
-  epRef->addCommunicator(sender);
+  epRef->addCommElem(sender);
 
   // Register sender with communicator.
-  communicator->registerComms(sender);
+  communicator->registerCommElement(sender);
 
   std::cout << "- Acceptor::cStyleAMCallback " << buffer->getSize()
             << std::endl;

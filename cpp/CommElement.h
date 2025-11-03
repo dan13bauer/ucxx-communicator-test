@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-// The communicator is the abstract base class of both the
+// The CommElement is the abstract base class of both the
 // per-client context on the exchange server side as well as the
 // exchange source side.
 
@@ -27,9 +27,8 @@ class CommElement {
 
   // Called when the underlying endpoint was closed
   // or the communicator is finished.
-  virtual void close(bool endpointClosing) = 0;
+  virtual void close() = 0;
 
- 
  protected:
   
   const std::shared_ptr<Communicator> communicator_;

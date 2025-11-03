@@ -41,6 +41,9 @@ class Communicator {
   /// @brief Method to get the Communicator reference
   static std::shared_ptr<Communicator> getInstance();
 
+  /// @brief Destructor.
+  ~Communicator();
+
   /// @brief Starts the Communicator
   void run();
 
@@ -50,7 +53,7 @@ class Communicator {
   /// @brief Registers a communication element with the communicator.
   /// This also automatically puts the element into the work queue.
   /// @param comms The element to register.
-  void registerComms(std::shared_ptr<CommElement> comms);
+  void registerCommElement(std::shared_ptr<CommElement> comms);
 
   /// @brief Adds an already registered communication element to the work queue
   /// such that "process" will be called on it.
@@ -73,16 +76,10 @@ class Communicator {
       std::shared_ptr<CommElement> commElement,
       HostPort hostPort);
 
-  void removeEndpointRef(std::shared_ptr<EndpointRef> ep) {
-    for (auto it = endpoints_.begin(); it != endpoints_.end(); ) {
-    if (it->second == ep) { 
-        it = endpoints_.erase(it); // erase returns the next iterator
-    } else {
-        ++it;
-    }
-}
-    
-  }
+  /// @brief Removes an endpoint from the communicator. This is required when
+  /// the endpoint has become stale since the other side has disappeared.
+  void removeEndpointRef(std::shared_ptr<EndpointRef> ep);
+
  private:
   Communicator() =
       default; // Private constructor to prevent direct instantiation

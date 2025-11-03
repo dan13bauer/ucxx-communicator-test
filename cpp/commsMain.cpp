@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
     std::shared_ptr<Receiver> recv =
         Receiver::create(communicator, FLAGS_hostname, port, taskId);
     receivers.push_back(recv);
-    communicator->registerComms(receivers.back());
+    communicator->registerCommElement(receivers.back());
     taskId++;
   }
 
