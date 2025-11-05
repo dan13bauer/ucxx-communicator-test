@@ -53,7 +53,7 @@ void Sender::process() {
       } else {
         dataPtr_ = nullptr; // signal that we are at the end.
       }
-            this->setState(ServerState::DataReady);
+      this->setState(ServerState::DataReady);
       communicator_->addToWorkQueue(getSelfPtr());
       break;
     case ServerState::WaitingForDataFromQueue:
@@ -177,7 +177,7 @@ void Sender::sendComplete(
   if (status == UCS_OK) {
     CHECK(dataPtr_ != nullptr, "dataPtr_ is null");
 
-        auto end = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::high_resolution_clock::now();
     auto duration = end - sendStart_;
     auto micros =
         std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
@@ -237,6 +237,10 @@ std::unique_ptr<cudf::packed_columns> Sender::makePackedColumns(
   auto table = std::make_unique<cudf::table>(std::move(columns));
 
   cudf::packed_columns packed = cudf::pack(table->view());
+
+  // sync the stream before giving the packed columns to UCX since UCX
+  // is not stream aware.
+  stream.synchronize();
 
   return std::unique_ptr<cudf::packed_columns>(new cudf::packed_columns(
       std::move(packed.metadata), std::move(packed.gpu_data)));
