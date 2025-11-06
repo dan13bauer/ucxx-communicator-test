@@ -85,6 +85,7 @@ WORKDIR /workspace/ucxx/cpp/build
 
 RUN make -j
 RUN make -j install
+RUN rm -rf /workspace/ucxx
 
 ARG ARROW_VERSION=21.0.0
 WORKDIR /opt
@@ -107,6 +108,8 @@ RUN git clone https://github.com/apache/arrow.git && \
       -DARROW_WITH_UTF8PROC=OFF \
       -DARROW_BUILD_TESTS=OFF && \
     ninja && ninja install
+
+RUN rm -rf /opt/arrow
 
 # Clone cudf and checkout branch 25.10
 WORKDIR /workspace
@@ -132,6 +135,8 @@ RUN mkdir -p build && cd build && \
 RUN cmake --build build -j -v
 RUN cmake --build build -j --target install -v
 
+RUN rm -rf /workspace/cudf
+
 # Set up working directory for the project
 WORKDIR /workspace
 
@@ -146,6 +151,17 @@ RUN cmake -B _build -S . \
     -DCMAKE_BUILD_TYPE=Release
 
 RUN cmake --build _build -j$(nproc)
+
+# Set environment variables for user and group
+ARG USER=dnb
+ARG USER_ID=1001
+ARG GROUP=perfleap
+ARG GROUP_ID=10004
+
+# Create group and user
+RUN groupadd -g ${GROUP_ID} ${GROUP} && \
+    useradd -m -u ${USER_ID} -g ${GROUP} -s /usr/bin/zsh ${USER}
+
 
 # Set the entrypoint to ucxx_perftest
 ENTRYPOINT ["/workspace/_build/cpp/communicator"]
