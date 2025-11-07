@@ -70,8 +70,11 @@ void Communicator::run() {
   cudaFree(0);
 
   // create the UCXX context, worker, listener-context etc.
-  context_ = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
-  // context_ = ucxx::createContext({}, UCP_FEATURE_TAG | UCP_FEATURE_AM);
+  if (FLAGS_ucxx_blocking_polling) {
+    context_ = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
+  } else {
+    context_ = ucxx::createContext({}, UCP_FEATURE_TAG | UCP_FEATURE_AM);
+  }
 
   worker_ = context_->createWorker();
 
