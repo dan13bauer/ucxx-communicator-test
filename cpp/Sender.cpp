@@ -39,18 +39,16 @@ std::shared_ptr<Sender> Sender::create(
 void Sender::process() {
   switch (state_) {
     case ServerState::Created:
+      // Allocate the packed columns structure once
+      dataPtr_ = makePackedColumns(FLAGS_rows, initialValue_);
       setState(ServerState::ReadyToTransfer);
       communicator_->addToWorkQueue(getSelfPtr());
       break;
     case ServerState::ReadyToTransfer:
       setState(ServerState::WaitingForDataFromQueue);
 
-      // Get the data and store it in the dataPtr_;
-      // FIXME: Fetch data from CudfQueueManager instead of generating it here.
-      // continue, until we reach the end.
-      if (sequenceNumber_ < numExchanges_) {
-        dataPtr_ = makePackedColumns(FLAGS_rows, sequenceNumber_);
-      } else {
+      // Reuse the same dataPtr_ until we reach the end
+      if (sequenceNumber_ >= numExchanges_) {
         dataPtr_ = nullptr; // signal that we are at the end.
       }
       this->setState(ServerState::DataReady);
@@ -87,7 +85,7 @@ void Sender::close() {
   communicator_->unregister(getSelfPtr());
 }
 
-std::string Sender::toString() {
+std::string Sender::toString() const {
   std::stringstream out;
   out << "[Sender " << key_ << " - " << initialValue_ << ":" << sequenceNumber_
       << "]";
@@ -129,10 +127,7 @@ void Sender::sendData() {
       false,
       [tid = key_, metadataTag, this](
           ucs_status_t status, std::shared_ptr<void> arg) {
-        if (status == UCS_OK) {
-          std::cout << "metadata successfully sent to " << tid
-                  << " with tag: " << std::hex << metadataTag << std::endl;
-        } else {
+        if (status != UCS_OK) {
           std::cerr << "Error in sendData, send metadata "
                   << ucs_status_string(status) << " failed for task: " << tid << std::endl;
           this->setState(ServerState::Done);
@@ -145,12 +140,8 @@ void Sender::sendData() {
   if (dataPtr_) {
       sendStart_ = std::chrono::high_resolution_clock::now();
       bytes_ = dataPtr_->gpu_data->size();
-    std::cout << "Sending rmm::buffer: " << std::hex << dataPtr_->gpu_data.get()
-              << " pointing to device memory: " << std::hex
-              << dataPtr_->gpu_data->data() << std::dec << " to task " << key_
-              << ":" << this->sequenceNumber_ << std::endl;
 
-    setState(ServerState::WaitingForSendComplete);
+    setState(ServerState::WaitingForSendComplete, bytes_);
     uint64_t dataTag = getDataTag(this->keyHash_, this->sequenceNumber_);
     dataRequest_ = endpointRef_->endpoint_->tagSend(
         dataPtr_->gpu_data->data(),
@@ -166,8 +157,9 @@ void Sender::sendData() {
     // Data pointer is null, so no more data will be coming.
     std::cout << "Finished transferring partition for task " << key_
               << std::endl;
-      setState(ServerState::Done);
-      communicator_->addToWorkQueue(getSelfPtr());
+    std::cout << std::endl << stateMetrics_.toString() << std::endl;
+    setState(ServerState::Done);
+    communicator_->addToWorkQueue(getSelfPtr());
   }
 }
 
@@ -190,9 +182,8 @@ void Sender::sendComplete(
     std::cout << "throughput: " << throughput << " MByte/s" << std::endl;
 
     this->sequenceNumber_++;
-    dataPtr_.reset(); // release memory.
-    std::cout << "Releasing dataPtr_ in sendComplete." << std::endl;
-    setState(ServerState::ReadyToTransfer);
+    // Don't reset dataPtr_ here - we reuse it for all sends
+    setState(ServerState::ReadyToTransfer, bytes_);
   } else {
     std::cerr << "Error in sendComplete, send complete "
               << ucs_status_string(status) << std::endl;

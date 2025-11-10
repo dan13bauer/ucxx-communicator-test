@@ -83,15 +83,20 @@ void Communicator::run() {
     worker_->initBlockingProgressMode();
   }
 
-  listener_ = worker_->createListener(
-      port_, Communicator::cStyleListenerCallback, this);
+  // Only create listener if port is non-zero
+  if (port_ != 0) {
+    listener_ = worker_->createListener(
+        port_, Communicator::cStyleListenerCallback, this);
 
-  // Setup the active message callback that handles the
-  // initial handshake and creates the senders.
-  ucxx::AmReceiverCallbackInfo info(kAmCallbackOwner, kAmCallbackId);
-  worker_->registerAmReceiverCallback(info, &Acceptor::cStyleAMCallback);
+    // Setup the active message callback that handles the
+    // initial handshake and creates the senders.
+    ucxx::AmReceiverCallbackInfo info(kAmCallbackOwner, kAmCallbackId);
+    worker_->registerAmReceiverCallback(info, &Acceptor::cStyleAMCallback);
 
-  std::cout << "Communicator running." << std::endl;
+    std::cout << "Communicator running with listener on port " << port_ << "." << std::endl;
+  } else {
+    std::cout << "Communicator running without listener (client-only mode)." << std::endl;
+  }
   while (running_) {
     try {
       // wait for progress.
@@ -112,6 +117,7 @@ void Communicator::run() {
           worker_->progress();
         }
       }
+
     } catch (ucxx::IOError& e) {
       std::cerr << "In Communicator main loop UCXX Exception: " << e.what()
                 << std::endl;
@@ -148,6 +154,10 @@ void Communicator::unregister(std::shared_ptr<CommElement> comms) {
   }
   workQueue_.erase(comms);
   elements_.erase(comms);
+  if (elements_.empty()) {
+    std::cout << "No communication elemehts left. Stopping!" << std::endl;
+    running_.store(false);
+  }
 }
 
 std::shared_ptr<EndpointRef> Communicator::assocEndpointRef(

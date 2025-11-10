@@ -23,4 +23,5 @@ buildrule(
   Sender.cpp
   Receiver.cpp
   protocol.cpp
-  util.cpp)
+  util.cpp
+  StateTransitionMetrics.cpp)

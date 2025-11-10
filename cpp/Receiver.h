@@ -7,6 +7,7 @@
 #include "protocol.h"
 #include "CommElement.h"
 #include "EndpointRef.h"
+#include "StateTransitionMetrics.h"
 
 class Receiver : public CommElement,
                  public std::enable_shared_from_this<Receiver> {
@@ -21,7 +22,12 @@ class Receiver : public CommElement,
 
   void close();
 
-  std::string toString();
+  std::string toString() const override;
+
+  /// @return Reference to the state transition metrics.
+  const StateTransitionMetrics& getStateTransitionMetrics() const {
+    return receiverMetrics_;
+  }
 
  private:
   enum class ReceiverState : uint32_t {
@@ -86,14 +92,26 @@ class Receiver : public CommElement,
   void onData(ucs_status_t status, std::shared_ptr<void> arg);
 
   /// @brief Sets the new state of this exchange source using
-  /// sequential consistency.
+  /// sequential consistency and records the transition metrics.
   /// @param newState the new state of the CudfExchangeSource.
-  void setState(ReceiverState newState) {
+  /// @param bytes Optional: number of bytes received during this transition.
+  void setState(ReceiverState newState, uint64_t bytes = 0) {
+    ReceiverState oldState = state_.load(std::memory_order_seq_cst);
+    if (oldState != newState) {
+      auto endTime = std::chrono::high_resolution_clock::now();
+      receiverMetrics_.recordTransition(
+          getStateNameForEnum(oldState),
+          getStateNameForEnum(newState),
+          lastStateChangeTime_,
+          endTime,
+          bytes);
+      lastStateChangeTime_ = endTime;
+    }
     state_.store(newState, std::memory_order_seq_cst);
   }
 
   /// @brief Returns the state.
-  ReceiverState getState() {
+  ReceiverState getState() const {
     return state_.load(std::memory_order_seq_cst);
   }
 
@@ -105,9 +123,21 @@ class Receiver : public CommElement,
   /// state is "expected".
   /// @param expected The expected state
   /// @param desired The desired state
+  /// @param bytes Optional: number of bytes received during this transition.
   /// @return Returns true if state was changed, false otherwise.
-  bool setStateIf(ReceiverState expected, ReceiverState desired);
+  bool setStateIf(ReceiverState expected, ReceiverState desired, uint64_t bytes = 0);
 
+  /// @brief Converts ReceiverState enum to string representation.
+  static std::string getStateNameForEnum(ReceiverState state) {
+    const std::string stateMap[] = {
+        "Created",
+        "WaitingForHandshakeComplete",
+        "ReadyToReceive",
+        "WaitingForMetadata",
+        "WaitingForData",
+        "Done"};
+    return stateMap[static_cast<uint32_t>(state)];
+  }
 
   void dumpValues(
       std::unique_ptr<cudf::packed_columns> columns,
@@ -127,6 +157,11 @@ class Receiver : public CommElement,
   uint32_t sequenceNumber_{0};
   std::atomic<bool> closed_{false};
   bool atEnd_{false}; // set when "atEnd" is being received.
+
+  // State transition metrics
+  StateTransitionMetrics receiverMetrics_;
+  std::chrono::time_point<std::chrono::high_resolution_clock>
+      lastStateChangeTime_{std::chrono::high_resolution_clock::now()};
 
   // The outstanding request - there can only be one outstanding request
   // at any point in time. Used for handshake, metadata and data.

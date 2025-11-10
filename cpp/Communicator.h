@@ -121,7 +121,7 @@ class Communicator {
   std::set<std::shared_ptr<CommElement>, PtrAddressLess> elements_;
   // protect elements_ by a mutex. Needs to be mutable if called from a const
   // function.
-  std::mutex elemMutex_;
+  mutable std::mutex elemMutex_;
 
   // The work queue for communication elements that need to do things on
   // the communicator thread.

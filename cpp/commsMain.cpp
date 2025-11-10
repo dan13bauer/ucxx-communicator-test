@@ -117,5 +117,7 @@ int main(int argc, char** argv) {
     taskId++;
   }
 
+  // Communicator will stop when the last communication element is finished
+  // and has de-registered itself. Join in the thread.
   commThread.join();
 }

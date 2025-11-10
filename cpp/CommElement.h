@@ -29,6 +29,10 @@ class CommElement {
   // or the communicator is finished.
   virtual void close() = 0;
 
+  /// @brief Returns a unique signature of the communication element.
+  virtual std::string toString() const = 0;
+
+
  protected:
   
   const std::shared_ptr<Communicator> communicator_;

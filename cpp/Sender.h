@@ -7,6 +7,7 @@
 #include "protocol.h"
 #include "CommElement.h"
 #include "EndpointRef.h"
+#include "StateTransitionMetrics.h"
 
 class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
  public:
@@ -20,7 +21,12 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
 
   void close() override;
 
-  std::string toString();
+  std::string toString() const override;
+
+  /// @return Reference to the state transition metrics.
+  const StateTransitionMetrics& getStateTransitionMetrics() const {
+    return stateMetrics_;
+  }
 
  private:
   enum class ServerState : uint32_t {
@@ -48,17 +54,40 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
   void sendComplete(ucs_status_t status, std::shared_ptr<void> arg);
 
   /// @brief Sets the new state of this exchange server using
-  /// sequential consistency.
+  /// sequential consistency and records the transition metrics.
   /// @param newState the new state of the CudfExchangeServer.
-  void setState(ServerState newState) {
+  /// @param bytes Optional: number of bytes transferred during this transition.
+  void setState(ServerState newState, uint64_t bytes = 0) {
+    ServerState oldState = state_.load(std::memory_order_seq_cst);
+    if (oldState != newState) {
+      auto endTime = std::chrono::high_resolution_clock::now();
+      stateMetrics_.recordTransition(
+          getStateNameForEnum(oldState),
+          getStateNameForEnum(newState),
+          lastStateChangeTime_,
+          endTime,
+          bytes);
+      lastStateChangeTime_ = endTime;
+    }
     state_.store(newState, std::memory_order_seq_cst);
   }
 
   /// @brief Returns the state.
-  ServerState getState() {
+  ServerState getState() const {
     return state_.load(std::memory_order_seq_cst);
   }
 
+  /// @brief Converts ServerState enum to string representation.
+  static std::string getStateNameForEnum(ServerState state) {
+    const std::string stateMap[] = {
+        "Created",
+        "ReadyToTransfer",
+        "WaitingForDataFromQueue",
+        "DataReady",
+        "WaitingForSendComplete",
+        "Done"};
+    return stateMap[static_cast<uint32_t>(state)];
+  }
 
   std::string key_; // The unique identifier of the connected receiver.
   uint32_t keyHash_; // A hash of above, used to create unique tags.
@@ -80,6 +109,9 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
   std::chrono::time_point<std::chrono::high_resolution_clock> sendStart_;
   std::size_t bytes_;
 
+  StateTransitionMetrics stateMetrics_;
+  std::chrono::time_point<std::chrono::high_resolution_clock>
+      lastStateChangeTime_{std::chrono::high_resolution_clock::now()};
 
   // For testing only:
   std::unique_ptr<cudf::packed_columns> makePackedColumns(
