@@ -46,6 +46,10 @@ std::shared_ptr<Communicator> Communicator::getInstance() {
 }
 
 Communicator::~Communicator() {
+  std::cout << "Communicator destructor called" << std::endl;
+  if (!listener_ || !worker_) {
+    return;
+  }
   listener_.reset();
   if (FLAGS_ucxx_blocking_polling) {
     auto req = worker_->flush();

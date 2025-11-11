@@ -61,8 +61,8 @@ RUN ./autogen.sh && \
 RUN make -j$(nproc) && \
     make install && \
     ldconfig && \
-    cd .. && \
-    rm -rf ucx
+    cd ..
+
 
 # Clone UCXX version 0.46.0
 WORKDIR /workspace
@@ -85,7 +85,7 @@ WORKDIR /workspace/ucxx/cpp/build
 
 RUN make -j
 RUN make -j install
-RUN rm -rf /workspace/ucxx
+#RUN rm -rf /workspace/ucxx
 
 ARG ARROW_VERSION=21.0.0
 WORKDIR /opt

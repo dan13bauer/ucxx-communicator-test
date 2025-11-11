@@ -1,6 +1,6 @@
 #!/bin/bash
 
-IMG=communicator-dev-dnb-img:latest
+IMG=communicator-run-dnb-img:latest
 NAME=communicator-dev-dnb
 
 docker run -it --rm --gpus all  --network=host --device /dev/infiniband/rdma_cm  \

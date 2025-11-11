@@ -1,0 +1,176 @@
+# ============================================================================
+# Stage 1: Builder - Contains all build dependencies and source code
+# ============================================================================
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies in a single layer and clean up
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    wget \
+    ca-certificates \
+    gnupg2 \
+    build-essential \
+    autoconf \
+    automake \
+    git \
+    libz-dev \
+    libssl-dev \
+    zlib1g-dev \
+    libgflags-dev \
+    libfmt-dev \
+    libtool \
+    ninja-build \
+    libnuma-dev \
+    libibverbs-dev \
+    librdmacm-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install CMake (minimal installation)
+WORKDIR /usr/local/share
+RUN wget -q https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-linux-x86_64.tar.gz && \
+    tar -xzf cmake-3.31.9-linux-x86_64.tar.gz && \
+    rm cmake-3.31.9-linux-x86_64.tar.gz && \
+    ln -s /usr/local/share/cmake-3.31.9-linux-x86_64/bin/* /usr/local/bin/
+
+# Build UCX from master branch
+WORKDIR /workspace
+RUN git clone --depth 1 https://github.com/openucx/ucx.git && \
+    cd ucx && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr/local \
+                --enable-mt \
+                --enable-optimizations \
+                --enable-srd \
+                --with-cuda=/usr/local/cuda \
+                --without-go \
+                --without-java \
+                --disable-logging \
+                --disable-debug \
+                --disable-assertions \
+                --disable-params-check && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    cd .. && \
+    rm -rf ucx
+
+# Build UCXX version 0.46.0
+WORKDIR /workspace
+RUN git clone --depth 1 --branch branch-0.46 https://github.com/rapidsai/ucxx.git && \
+    cd ucxx/cpp && \
+    mkdir -p build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX="/usr/local" \
+      -DBUILD_TESTS=OFF \
+      -DBUILD_BENCHMARKS=ON \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DUCXX_ENABLE_PYTHON=OFF \
+      -DUCXX_ENABLE_RMM=ON \
+      -DUCXX_BENCHMARKS_ENABLE_CUDA=ON && \
+    make -j$(nproc) && \
+    make install && \
+    cd /workspace && \
+    rm -rf ucxx
+
+# Build Apache Arrow
+ARG ARROW_VERSION=21.0.0
+WORKDIR /opt
+RUN git clone --depth 1 --branch apache-arrow-${ARROW_VERSION} https://github.com/apache/arrow.git && \
+    cd arrow/cpp && \
+    mkdir -p build && cd build && \
+    cmake .. -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/opt/arrow \
+      -DARROW_BUILD_SHARED=ON \
+      -DARROW_BUILD_STATIC=OFF \
+      -DARROW_PARQUET=ON \
+      -DARROW_DATASET=ON \
+      -DARROW_FILESYSTEM=ON \
+      -DARROW_CSV=ON \
+      -DARROW_JSON=ON \
+      -DARROW_IPC=ON \
+      -DARROW_COMPUTE=ON \
+      -DARROW_WITH_UTF8PROC=OFF \
+      -DARROW_BUILD_TESTS=OFF && \
+    ninja && \
+    ninja install && \
+    cd /opt && \
+    rm -rf arrow
+
+# Build cudf
+WORKDIR /workspace
+RUN git clone --depth 1 --branch branch-25.10 https://github.com/rapidsai/cudf.git && \
+    cd cudf/cpp && \
+    mkdir -p build && cd build && \
+    cmake .. \
+      -DCMAKE_INSTALL_PREFIX="/usr/local" \
+      -DCMAKE_CUDA_ARCHITECTURES="80" \
+      -DUSE_NVTX=OFF \
+      -DBUILD_TESTS=OFF \
+      -DBUILD_BENCHMARKS=OFF \
+      -DDISABLE_DEPRECATION_WARNINGS=ON \
+      -DCUDF_USE_PER_THREAD_DEFAULT_STREAM=OFF \
+      -DCUDF_LARGE_STRINGS_DISABLED=OFF \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="/opt/arrow" && \
+    cmake --build . -j$(nproc) && \
+    cmake --build . --target install && \
+    cd /workspace && \
+    rm -rf cudf
+
+# Copy and build project
+WORKDIR /workspace
+COPY . .
+RUN cmake -B _build -S . -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build _build -j$(nproc)
+
+# ============================================================================
+# Stage 2: Runtime - Minimal runtime image with only necessary components
+# ============================================================================
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libgflags2.2 \
+    libfmt9 \
+    libnuma1 \
+    libibverbs1 \
+    librdmacm1 \
+    libssl3 \
+    zlib1g && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy runtime libraries from builder
+COPY --from=builder /usr/local/lib /usr/local/lib
+COPY --from=builder /usr/local/include /usr/local/include
+COPY --from=builder /etc/libibverbs.d /etc/libibverbs.d
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libibverbs /usr/lib/x86_64-linux-gnu/libibverbs
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libefa.so.1.3.50.0 /usr/lib/x86_64-linux-gnu
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libmana.so.1.0.50.0 /usr/lib/x86_64-linux-gnu
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libmlx4.so.1.0.50.0 /usr/lib/x86_64-linux-gnu
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libmlx5.so.1.24.50.0 /usr/lib/x86_64-linux-gnu
+
+# Copy the built application
+COPY --from=builder /workspace/_build/cpp/communicator /usr/local/bin/communicator
+
+# Update library cache
+RUN ldconfig
+
+# Set environment variables for user and group
+ARG USER=dnb
+ARG USER_ID=1001
+ARG GROUP=perfleap
+ARG GROUP_ID=10004
+
+# Create group and user
+RUN groupadd -g ${GROUP_ID} ${GROUP} && \
+    useradd -m -u ${USER_ID} -g ${GROUP} -s /bin/bash ${USER}
+
+WORKDIR /workspace
+
+# Set the entrypoint
+ENTRYPOINT ["/usr/local/bin/communicator"]

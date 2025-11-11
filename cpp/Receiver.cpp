@@ -33,7 +33,6 @@ std::shared_ptr<Receiver> Receiver::create(
 }
 
 void Receiver::process() {
-  std::cout << "+ Receiver::process state " << receiverStateNames_[state_] << std::endl;
   if (closed_) {
     // Driver thread called closed
     cleanUp();
@@ -100,6 +99,7 @@ void Receiver::cleanUp() {
   if (communicator_) {
     communicator_->unregister(getSelfPtr());
   }
+  std::cout << std::endl << receiverMetrics_.toString() << std::endl;
 }
 
 
@@ -110,8 +110,6 @@ void Receiver::close() {
   if (!closed_.compare_exchange_strong(expected, desired)) {
     return; // already closed.
   }
-  std::cerr << "Close receiver to remote " << key_ << "." << std::endl;
-  std::cout << std::endl << receiverMetrics_.toString() << std::endl;
 
   //  Let the Communicator progress thread do the actual clean-up
   setState(ReceiverState::Done);

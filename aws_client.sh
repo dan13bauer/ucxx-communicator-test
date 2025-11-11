@@ -5,9 +5,8 @@
 LISTENER_PORT=0
 PORTS="4567"
 HOSTNAME="127.0.0.1"
-UCXX_ERROR_HANDLING=true
-UCXX_BLOCKING_POLLING=true
-GPU=3
+UCXX_ERROR_HANDLING=false
+UCXX_BLOCKING_POLLING=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -32,10 +31,6 @@ while [[ $# -gt 0 ]]; do
       UCXX_BLOCKING_POLLING="$2"
       shift 2
       ;;
-    --gpu)
-      GPU="$2"
-      shift 2
-      ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -45,7 +40,6 @@ while [[ $# -gt 0 ]]; do
       echo "  --hostname <hostname>          Hostname to connect to (default: ${HOSTNAME})"
       echo "  --ucxx_error_handling <bool>   UCXX error handling (default: ${UCXX_ERROR_HANDLING})"
       echo "  --ucxx_blocking_polling <bool> UCXX blocking polling (default: ${UCXX_BLOCKING_POLLING})"
-      echo "  --gpu <number>                 The GPU (0-7) on which to run (default: ${GPU})"
       echo "  -h, --help                     Show this help message"
       exit 0
       ;;
@@ -72,21 +66,10 @@ docker run --rm -it \
     --network=host \
     --device /dev/infiniband/rdma_cm \
     --device=/dev/infiniband/uverbs0 \
-    --device=/dev/infiniband/uverbs1 \
-    --device=/dev/infiniband/uverbs2 \
-    --device=/dev/infiniband/uverbs3 \
-    --device=/dev/infiniband/uverbs4 \
-    --device=/dev/infiniband/uverbs5 \
-    --device=/dev/infiniband/uverbs6 \
-    --device=/dev/infiniband/uverbs7 \
-    --device=/dev/infiniband/uverbs8 \
-    --device=/dev/infiniband/uverbs9 \
     --cap-add=IPC_LOCK \
     --shm-size=1g \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
-    --pid host \
-    -e "CUDA_VISIBLE_DEVICES=${GPU}" \
     ${IMG} \
     --listener_port=${LISTENER_PORT} \
     --ports=${PORTS} \

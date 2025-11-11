@@ -39,12 +39,12 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --listener_port <port>         Listener port (default: 4567)"
-      echo "  --num_chunks <number>          Number of chunks (default: 10)"
-      echo "  --rows <number>                Number of rows (default: 10000000)"
-      echo "  --ucxx_error_handling <bool>   UCXX error handling (default: true)"
-      echo "  --ucxx_blocking_polling <bool> UCXX blocking polling (default: true)"
-      echo "  --gpu <number>                 The GPU (0-7) on which to run (default: 7)"
+      echo "  --listener_port <port>         Listener port (default: ${LISTENER_PORT})"
+      echo "  --num_chunks <number>          Number of chunks (default: ${NUM_CHUNKS})"
+      echo "  --rows <number>                Number of rows (default: ${ROWS})"
+      echo "  --ucxx_error_handling <bool>   UCXX error handling (default: ${UCXX_ERROR_HANDLING})"
+      echo "  --ucxx_blocking_polling <bool> UCXX blocking polling (default: ${UCXX_BLOCKING_POLLING})"
+      echo "  --gpu <number>                 The GPU (0-7) on which to run (default: ${GPU})"
       echo "  -h, --help                     Show this help message"
       exit 0
       ;;
@@ -84,9 +84,10 @@ docker run --rm -it \
     --shm-size=1g \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
+    --pid host \
     -e "CUDA_VISIBLE_DEVICES=${GPU}" \
+    -e "UCX_PROTO_INFO=y" \
     ${IMG} \
-    /workspace/ucxx-communicator-test/build/cpp/communicator \
     --listener_port=${LISTENER_PORT} \
     --num_chunks=${NUM_CHUNKS} \
     --rows=${ROWS} \
