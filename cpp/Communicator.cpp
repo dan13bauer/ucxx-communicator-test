@@ -6,6 +6,11 @@
 #include "protocol.h"
 #include "CommElement.h"
 #include "EndpointRef.h"
+#include <gflags/gflags.h>
+
+DECLARE_bool(ucxx_error_handling);
+DECLARE_bool(ucxx_blocking_polling);
+
 
 // static
 std::once_flag Communicator::onceFlag;
@@ -42,8 +47,12 @@ std::shared_ptr<Communicator> Communicator::getInstance() {
 
 Communicator::~Communicator() {
   listener_.reset();
-  auto req = worker_->flush();
-  worker_->progressWorkerEvent(100);
+  if (FLAGS_ucxx_blocking_polling) {
+    auto req = worker_->flush();
+    worker_->progressWorkerEvent(100);
+  } else {
+    worker_->progress();
+  }
   worker_.reset();
   context_.reset();
   std::cout << "Communicator destructed" << std::endl;
@@ -53,38 +62,62 @@ Communicator::~Communicator() {
 /// All operations of the communicator will be carried out in the thread
 /// that calls run.
 void Communicator::run() {
+  std::cout << "Using error handling mode: " << FLAGS_ucxx_error_handling << std::endl;
+  std::cout << "Using blocking progress mode: " << FLAGS_ucxx_blocking_polling << std::endl;
+
   running_.store(true);
   // Force CUDA context creation
   cudaFree(0);
 
   // create the UCXX context, worker, listener-context etc.
-  context_ = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
+  if (FLAGS_ucxx_blocking_polling) {
+    context_ = ucxx::createContext({}, ucxx::Context::defaultFeatureFlags);
+  } else {
+    context_ = ucxx::createContext({}, UCP_FEATURE_TAG | UCP_FEATURE_AM);
+  }
+
   worker_ = context_->createWorker();
 
-  // Communicator is using blocking progress mode.
-  worker_->initBlockingProgressMode();
+  if (FLAGS_ucxx_blocking_polling) {
+    // Communicator is using blocking progress mode.
+    worker_->initBlockingProgressMode();
+  }
 
-  listener_ = worker_->createListener(
-      port_, Communicator::cStyleListenerCallback, this);
+  // Only create listener if port is non-zero
+  if (port_ != 0) {
+    listener_ = worker_->createListener(
+        port_, Communicator::cStyleListenerCallback, this);
 
-  // Setup the active message callback that handles the
-  // initial handshake and creates the senders.
-  ucxx::AmReceiverCallbackInfo info(kAmCallbackOwner, kAmCallbackId);
-  worker_->registerAmReceiverCallback(info, &Acceptor::cStyleAMCallback);
+    // Setup the active message callback that handles the
+    // initial handshake and creates the senders.
+    ucxx::AmReceiverCallbackInfo info(kAmCallbackOwner, kAmCallbackId);
+    worker_->registerAmReceiverCallback(info, &Acceptor::cStyleAMCallback);
 
-  std::cout << "Communicator running." << std::endl;
+    std::cout << "Communicator running with listener on port " << port_ << "." << std::endl;
+  } else {
+    std::cout << "Communicator running without listener (client-only mode)." << std::endl;
+  }
   while (running_) {
     try {
       // wait for progress.
-      worker_->progressWorkerEvent(0);
+      if (FLAGS_ucxx_blocking_polling) {
+        worker_->progressWorkerEvent(0);
+      } else {
+        worker_->progress();
+      }
 
       // process the work queue. Make sure that communication is progressed
       // after each call to a comms element, otherwise we will deadlock.
       while (!workQueue_.empty()) {
         auto comms = workQueue_.pop();
         comms->process();
-        worker_->progressWorkerEvent(0);
+        if (FLAGS_ucxx_blocking_polling) {
+          worker_->progressWorkerEvent(0);
+        } else {
+          worker_->progress();
+        }
       }
+
     } catch (ucxx::IOError& e) {
       std::cerr << "In Communicator main loop UCXX Exception: " << e.what()
                 << std::endl;
@@ -121,6 +154,10 @@ void Communicator::unregister(std::shared_ptr<CommElement> comms) {
   }
   workQueue_.erase(comms);
   elements_.erase(comms);
+  if (elements_.empty()) {
+    std::cout << "No communication elemehts left. Stopping!" << std::endl;
+    running_.store(false);
+  }
 }
 
 std::shared_ptr<EndpointRef> Communicator::assocEndpointRef(
@@ -134,13 +171,15 @@ std::shared_ptr<EndpointRef> Communicator::assocEndpointRef(
   }
   // endpoint doesn't exist. Need to connect. Enable error handling.
   auto ep = worker_->createEndpointFromHostname(
-      hostPort.hostname, hostPort.port, true);
+      hostPort.hostname, hostPort.port, FLAGS_ucxx_error_handling);
   std::shared_ptr<EndpointRef> epRef = nullptr;
   if (ep != nullptr) {
     epRef = std::make_shared<EndpointRef>(ep);
     epRef->addCommElem(comms);
-    // register on close callback.
-    ep->setCloseCallback(EndpointRef::onClose, epRef);
+    if (FLAGS_ucxx_error_handling) {
+      // register on close callback.
+      ep->setCloseCallback(EndpointRef::onClose, epRef);
+    }
     endpoints_.insert(std::pair{hostPort, epRef});
   }
   return epRef;
@@ -182,9 +221,11 @@ void Communicator::listenerCallback(ucp_conn_request_h conn_request) {
   // shared. This guarantees that between any two nodes, there will be at most 2
   // endpoints, one per direction. For compatibility reasons, both incoming and
   // outgoing endpoints are represented using the EndpointRef.
-  auto endpoint = listener_->createEndpointFromConnRequest(conn_request, true);
+  auto endpoint = listener_->createEndpointFromConnRequest(conn_request, FLAGS_ucxx_error_handling);
   auto epRef = std::make_shared<EndpointRef>(endpoint);
-  endpoint->setCloseCallback(EndpointRef::onClose, epRef);
+  if (FLAGS_ucxx_error_handling) {
+    endpoint->setCloseCallback(EndpointRef::onClose, epRef);
+  }
   // Add this endpoint reference to the list of endpoints.
   unsigned long val = std::strtoul(port_str, nullptr, 10);
   CHECK(

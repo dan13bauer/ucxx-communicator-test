@@ -111,13 +111,14 @@ void Receiver::close() {
     return; // already closed.
   }
   std::cerr << "Close receiver to remote " << key_ << "." << std::endl;
+  std::cout << std::endl << receiverMetrics_.toString() << std::endl;
 
   //  Let the Communicator progress thread do the actual clean-up
   setState(ReceiverState::Done);
   communicator_->addToWorkQueue(getSelfPtr());
 }
 
-std::string Receiver::toString() {
+std::string Receiver::toString() const {
   std::stringstream out;
   out << "[Receiver " << key_ << "]";
   return out.str();
@@ -182,11 +183,6 @@ void Receiver::getMetadata() {
   uint32_t sizeMetadata = 4096; // shouldn't be a fixed size.
   auto metadataReq = std::make_shared<std::vector<uint8_t>>(sizeMetadata);
   uint64_t metadataTag = getMetadataTag(taskIdHash_, sequenceNumber_);
-
-  std::cout << toString()
-            << " waiting for metadata for chunk: " << sequenceNumber_
-            << " using tag: " << std::hex << metadataTag << std::dec
-            << std::endl;
 
   request_ = endpointRef_->endpoint_->tagRecv(
       reinterpret_cast<void*>(metadataReq->data()),
@@ -256,13 +252,8 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
     // sync after allocating.
     stream.synchronize();
 
-    std::cout << "Allocated " << ptr->metadata.dataSizeBytes
-            << " bytes of device memory" << std::endl;
     // Initiate the transfer of the actual data from GPU-2-GPU
     uint64_t dataTag = getDataTag(taskIdHash_, sequenceNumber_);
-    std::cout << toString()
-              << " waiting for data for chunk: " << sequenceNumber_
-              << " using tag: " << std::hex << dataTag << std::dec << std::endl;
 
     if (!setStateIf(
             ReceiverState::WaitingForMetadata, ReceiverState::WaitingForData)) {
@@ -296,26 +287,28 @@ void Receiver::onData(ucs_status_t status, std::shared_ptr<void> arg) {
     std::cout << toString() << errorMsg << std::endl;
     setState(ReceiverState::Done);
   } else {
-    std::cout << toString() << "+ onData " << ucs_status_string(status)
-              << "got chunk: " << sequenceNumber_ << std::endl;
-
     this->sequenceNumber_++;
 
     std::shared_ptr<DataAndMetadata> ptr =
         std::static_pointer_cast<DataAndMetadata>(arg);
 
-    std::unique_ptr<cudf::packed_columns> columns =
-        std::make_unique<cudf::packed_columns>(
-            std::move(ptr->metadata.cudfMetadata), std::move(ptr->dataBuf));
-    dumpValues(std::move(columns), ptr->metadata);
-    setStateIf(ReceiverState::WaitingForData, ReceiverState::ReadyToReceive);
+    // Record transition with bytes received
+    setStateIf(
+        ReceiverState::WaitingForData,
+        ReceiverState::ReadyToReceive,
+        ptr->metadata.dataSizeBytes);
   }
   communicator_->addToWorkQueue(getSelfPtr());
 }
 
 bool Receiver::setStateIf(
     Receiver::ReceiverState expected,
-    Receiver::ReceiverState desired) {
+    Receiver::ReceiverState desired,
+    uint64_t bytes) {
+  if (desired == expected) {
+    return true;
+  }
+  auto endTime = std::chrono::high_resolution_clock::now();
   ReceiverState exp = expected;
   // since spurious failures can happen even if state_ == expected, we need
   // to do this in a loop.
@@ -328,6 +321,14 @@ bool Receiver::setStateIf(
     // spurious failure.
     exp = expected; // reset for the next try
   }
+  receiverMetrics_.recordTransition(
+      getStateNameForEnum(expected),
+      getStateNameForEnum(desired),
+      lastStateChangeTime_,
+      endTime,
+      bytes);
+  lastStateChangeTime_ = endTime;
+
   return true;
 }
 

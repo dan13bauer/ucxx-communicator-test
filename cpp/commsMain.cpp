@@ -23,6 +23,8 @@ DEFINE_string(
     mem_mgr,
     "pool",
     "Cuda device resource manager: none | cuda | pool | async | arena | managed | managed_pool");
+DEFINE_bool(ucxx_error_handling, true, "Whether to use UCXX error handling");
+DEFINE_bool(ucxx_blocking_polling, true, "Use blocking polling (true) or spinning polling (false)");
 
 // Assisted by watsonx Code Assistant
 
@@ -115,5 +117,7 @@ int main(int argc, char** argv) {
     taskId++;
   }
 
+  // Communicator will stop when the last communication element is finished
+  // and has de-registered itself. Join in the thread.
   commThread.join();
 }
