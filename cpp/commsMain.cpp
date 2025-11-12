@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
 
   // Setup the communicator with the listener on the given port.
   auto communicator = Communicator::initAndGet(FLAGS_listener_port);
-  communicatorPtr = std::shared_ptr<Communicator>(communicator.get());
+  communicatorPtr = communicator;  // Fixed: Use the shared_ptr directly, don't create a new one from raw pointer
   std::signal(SIGTERM, signalHandler);
 
   std::thread commThread =

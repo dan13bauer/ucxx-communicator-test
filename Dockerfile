@@ -162,6 +162,7 @@ ARG GROUP_ID=10004
 RUN groupadd -g ${GROUP_ID} ${GROUP} && \
     useradd -m -u ${USER_ID} -g ${GROUP} -s /usr/bin/zsh ${USER}
 
+USER ${USER}
 
 # Set the entrypoint to ucxx_perftest
 ENTRYPOINT ["/workspace/_build/cpp/communicator"]

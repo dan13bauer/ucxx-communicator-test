@@ -47,16 +47,20 @@ std::shared_ptr<Communicator> Communicator::getInstance() {
 
 Communicator::~Communicator() {
   std::cout << "Communicator destructor called" << std::endl;
-  if (!listener_ || !worker_) {
-    return;
+  elements_.clear();
+  // close all endpoints.
+  for (const auto& [_, endpointPtr] : endpoints_) {
+      if (endpointPtr) {
+          if (FLAGS_ucxx_error_handling) {
+            // unregister close callback to prevent that onClose
+            // interferes.
+            endpointPtr->endpoint_->setCloseCallback(nullptr, nullptr);
+          }
+          endpointPtr->endpoint_->closeBlocking();
+      }
   }
+  endpoints_.clear();
   listener_.reset();
-  if (FLAGS_ucxx_blocking_polling) {
-    auto req = worker_->flush();
-    worker_->progressWorkerEvent(100);
-  } else {
-    worker_->progress();
-  }
   worker_.reset();
   context_.reset();
   std::cout << "Communicator destructed" << std::endl;
@@ -159,7 +163,7 @@ void Communicator::unregister(std::shared_ptr<CommElement> comms) {
   workQueue_.erase(comms);
   elements_.erase(comms);
   if (elements_.empty()) {
-    std::cout << "No communication elemehts left. Stopping!" << std::endl;
+    std::cout << "No communication elements left. Stopping!" << std::endl;
     running_.store(false);
   }
 }

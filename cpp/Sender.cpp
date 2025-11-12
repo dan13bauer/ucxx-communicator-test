@@ -81,7 +81,7 @@ void Sender::close() {
   if (!closed_.compare_exchange_strong(expected, desired)) {
     return; // already closed.
   }
-  std::cout << "Close Sender to remote " << key_;
+  std::cout << "Close Sender to remote " << key_ << std::endl;
   communicator_->unregister(getSelfPtr());
 }
 
