@@ -152,4 +152,164 @@ int main(int argc, char** argv) {
   // Communicator will stop when the last communication element is finished
   // and has de-registered itself. Join in the thread.
   commThread.join();
+
+  if (receivers.size() == 0) {
+    return 0;
+  }
+
+  // Aggregate metrics from all receivers using TransitionRecord vectors
+  std::cout << "\n=== Aggregating metrics from " << receivers.size()
+            << " receivers ===\n" << std::endl;
+
+  // Collect all TransitionRecords from all receivers, grouped by receiver and transition type
+  std::map<std::pair<std::string, std::string>,
+           std::vector<std::vector<StateTransitionMetrics::TransitionRecord>>> recordsByTransition;
+
+  // Iterate through all receivers and collect their transition records
+  for (size_t i = 0; i < receivers.size(); ++i) {
+    const auto& receiverMetrics = receivers[i]->getStateTransitionMetrics();
+    const auto& history = receiverMetrics.getTransitionHistory();
+
+    std::cout << "Receiver " << i << " has " << history.size()
+              << " transition records." << std::endl;
+
+    // First pass: group records by transition type for this receiver
+    std::map<std::pair<std::string, std::string>,
+             std::vector<StateTransitionMetrics::TransitionRecord>> receiverRecords;
+    for (const auto& record : history) {
+      auto key = std::make_pair(record.fromState, record.toState);
+      receiverRecords[key].push_back(record);
+    }
+
+    // Second pass: add this receiver's records to the global map
+    for (const auto& [key, records] : receiverRecords) {
+      if (recordsByTransition.find(key) == recordsByTransition.end()) {
+        recordsByTransition[key] = std::vector<std::vector<StateTransitionMetrics::TransitionRecord>>();
+      }
+      recordsByTransition[key].push_back(records);
+    }
+  }
+
+  // Structure to hold aggregated statistics
+  std::map<std::pair<std::string, std::string>, StateTransitionMetrics::TransitionStats>
+      aggregatedStats;
+
+  // Process each transition type: align records by position, average durations, sum bytes
+  for (auto& [transitionKey, receiverRecordsVec] : recordsByTransition) {
+    if (receiverRecordsVec.empty()) {
+      continue;
+    }
+
+    // Find the minimum number of records across all receivers for this transition type
+    size_t minRecords = receiverRecordsVec[0].size();
+    for (const auto& receiverRecords : receiverRecordsVec) {
+      minRecords = std::min(minRecords, receiverRecords.size());
+    }
+
+    std::cout << "  " << transitionKey.first << " -> " << transitionKey.second
+              << ": " << receiverRecordsVec.size() << " receivers, "
+              << "min records per receiver=" << minRecords << std::endl;
+
+    if (minRecords == 0) {
+      continue;
+    }
+
+    // Calculate 5% boundaries based on the minimum record count
+    size_t trimCount = static_cast<size_t>(minRecords * 0.05);
+    size_t startIdx = trimCount;
+    size_t endIdx = minRecords - trimCount;
+
+    // If we have too few records, use all of them
+    if (endIdx <= startIdx) {
+      startIdx = 0;
+      endIdx = minRecords;
+    }
+
+    std::cout << "    Using records [" << startIdx << ".." << endIdx << ")"
+              << " (trimmed " << (startIdx + (minRecords - endIdx)) << ")" << std::endl;
+
+    // Compute statistics from the trimmed range
+    StateTransitionMetrics::TransitionStats stats;
+    stats.count = 0;
+    stats.totalDurationMicros = 0;
+    stats.totalBytes = 0;
+    stats.minDurationMicros = INT64_MAX;
+    stats.maxDurationMicros = INT64_MIN;
+    stats.minBytes = UINT64_MAX;
+    stats.maxBytes = 0;
+
+    // For each position i in the trimmed range
+    for (size_t i = startIdx; i < endIdx; ++i) {
+      // Average duration across all receivers at position i
+      int64_t totalDuration = 0;
+      uint64_t totalBytes = 0;
+      int64_t minDur = INT64_MAX;
+      int64_t maxDur = INT64_MIN;
+      uint64_t minByt = UINT64_MAX;
+      uint64_t maxByt = 0;
+
+      for (const auto& receiverRecords : receiverRecordsVec) {
+        const auto& record = receiverRecords[i];
+        totalDuration += record.durationMicros;
+        totalBytes += record.bytes;  // Sum bytes across receivers
+        minDur = std::min(minDur, record.durationMicros);
+        maxDur = std::max(maxDur, record.durationMicros);
+        minByt = std::min(minByt, record.bytes);
+        maxByt = std::max(maxByt, record.bytes);
+      }
+
+      // Average duration across receivers
+      int64_t avgDuration = totalDuration / receiverRecordsVec.size();
+
+      stats.count++;
+      stats.totalDurationMicros += avgDuration;
+      stats.totalBytes += totalBytes;
+      stats.minDurationMicros = std::min(stats.minDurationMicros, minDur);
+      stats.maxDurationMicros = std::max(stats.maxDurationMicros, maxDur);
+      stats.minBytes = std::min(stats.minBytes, minByt);
+      stats.maxBytes = std::max(stats.maxBytes, maxByt);
+    }
+
+    // Handle edge case where no records were processed
+    if (stats.count == 0) {
+      stats.minDurationMicros = 0;
+      stats.minBytes = 0;
+    }
+
+    aggregatedStats[transitionKey] = stats;
+  }
+
+  // Display aggregated statistics
+  std::cout << "\n=== AGGREGATED METRICS FROM ALL RECEIVERS ===\n";
+  std::cout << "  (First and last 5% of records trimmed for each transition type)\n\n";
+
+  if (aggregatedStats.empty()) {
+    std::cout << "  No transitions recorded across all receivers.\n";
+  } else {
+    std::cout << "  Total unique transition types: " << aggregatedStats.size() << "\n\n";
+
+    for (const auto& [key, stats] : aggregatedStats) {
+      std::cout << "  " << key.first << " -> " << key.second << ":\n";
+      std::cout << "    Count: " << stats.count << "\n";
+      std::cout << "    Total duration: " << stats.totalDurationMicros << " µs\n";
+      std::cout << "    Average duration: " << stats.getAverageMicros() << " µs\n";
+      std::cout << "    Min duration: " << stats.minDurationMicros << " µs\n";
+      std::cout << "    Max duration: " << stats.maxDurationMicros << " µs\n";
+      std::cout << "    Total bytes: " << stats.totalBytes << "\n";
+      std::cout << "    Average bytes: " << stats.getAverageBytes() << "\n";
+      std::cout << "    Min bytes: " << stats.minBytes << "\n";
+      std::cout << "    Max bytes: " << stats.maxBytes << "\n";
+
+      // Only output throughput if bytes were transferred
+      if (stats.totalBytes > 0) {
+        std::cout << "    Overall throughput: " << stats.getThroughputMBps()
+                  << " MB/s\n";
+        std::cout << "    Average throughput: " << stats.getAverageThroughputMBps()
+                  << " MB/s\n";
+      }
+      std::cout << "\n";
+    }
+  }
+
+  std::cout << "=== END OF AGGREGATED METRICS ===\n" << std::endl;
 }
