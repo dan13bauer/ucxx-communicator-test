@@ -15,8 +15,8 @@
 #include "Receiver.h"
 
 DEFINE_uint32(listener_port, 4567, "Port number of the listener");
-DEFINE_string(ports, "", "List of port numbers to which to connect to");
-DEFINE_string(hostname, "127.0.0.1", "Host name to which to connect to");
+DEFINE_string(ports, "", "Comma-separated list of port numbers to which to connect to");
+DEFINE_string(hostnames, "127.0.0.1", "Comma-separated list of host names to which to connect to");
 DEFINE_uint32(num_chunks, 10, "Number of chunks");
 DEFINE_uint64(rows, 1, "Number of rows");
 DEFINE_string(
@@ -34,12 +34,34 @@ std::vector<uint32_t> stringToVector(const std::string& str) {
   std::string token;
 
   while (std::getline(ss, token, ',')) {
-    try {
-      uint32_t num = std::stoul(token);
-      vec.push_back(num);
-    } catch (const std::invalid_argument& e) {
-      // Handle invalid conversions (optional)
-      std::cerr << "Invalid number: " << token << std::endl;
+    // Trim whitespace from token
+    token.erase(0, token.find_first_not_of(" \t\n\r\f\v"));
+    token.erase(token.find_last_not_of(" \t\n\r\f\v") + 1);
+    if (!token.empty()) {
+      try {
+        uint32_t num = std::stoul(token);
+        vec.push_back(num);
+      } catch (const std::invalid_argument& e) {
+        // Handle invalid conversions (optional)
+        std::cerr << "Invalid number: " << token << std::endl;
+      }
+    }
+  }
+
+  return vec;
+}
+
+std::vector<std::string> stringToHostnames(const std::string& str) {
+  std::vector<std::string> vec;
+  std::stringstream ss(str);
+  std::string token;
+
+  while (std::getline(ss, token, ',')) {
+    // Trim whitespace from token
+    token.erase(0, token.find_first_not_of(" \t\n\r\f\v"));
+    token.erase(token.find_last_not_of(" \t\n\r\f\v") + 1);
+    if (!token.empty()) {
+      vec.push_back(token);
     }
   }
 
@@ -89,7 +111,7 @@ int main(int argc, char** argv) {
 
   // Setup the communicator with the listener on the given port.
   auto communicator = Communicator::initAndGet(FLAGS_listener_port);
-  communicatorPtr = std::shared_ptr<Communicator>(communicator.get());
+  communicatorPtr = communicator;  // Fixed: Use the shared_ptr directly, don't create a new one from raw pointer
   std::signal(SIGTERM, signalHandler);
 
   std::thread commThread =
@@ -104,14 +126,24 @@ int main(int argc, char** argv) {
   std::vector<std::shared_ptr<Receiver>> receivers;
 
   std::vector<uint32_t> portsVec = stringToVector(FLAGS_ports);
+  std::vector<std::string> hostnamesVec = stringToHostnames(FLAGS_hostnames);
+
+  // Validate that hostnames and ports lists have equal length
+  if (!portsVec.empty() && hostnamesVec.size() != portsVec.size()) {
+    std::cerr << "Error: Number of hostnames (" << hostnamesVec.size()
+              << ") does not match number of ports (" << portsVec.size() << ")" << std::endl;
+    std::cerr << "Please provide equal number of comma-separated hostnames and ports." << std::endl;
+    return 1;
+  }
 
   uint32_t taskId = getRandomTaskId();
 
-  for (auto port : portsVec) {
-    // create and start a receiver
-    std::cout << "Creating receiver from taskId " << taskId << std::endl;
+  for (size_t i = 0; i < portsVec.size(); ++i) {
+    // create and start a receiver using corresponding hostname and port
+    std::cout << "Creating receiver from taskId " << taskId
+              << " for " << hostnamesVec[i] << ":" << portsVec[i] << std::endl;
     std::shared_ptr<Receiver> recv =
-        Receiver::create(communicator, FLAGS_hostname, port, taskId);
+        Receiver::create(communicator, hostnamesVec[i], portsVec[i], taskId);
     receivers.push_back(recv);
     communicator->registerCommElement(receivers.back());
     taskId++;

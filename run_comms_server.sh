@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-IMG=communicator-dev-dnb-img:latest
+IMG=communicator-run-dnb-img:latest
 
 echo "Starting communicator server with:"
 echo "  Listener Port: $LISTENER_PORT"
