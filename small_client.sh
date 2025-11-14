@@ -4,10 +4,9 @@
 # No listener by default, set port to 0.
 LISTENER_PORT=0
 PORTS="4567"
-HOSTNAME="127.0.0.1"
-UCXX_ERROR_HANDLING=true
-UCXX_BLOCKING_POLLING=true
-GPU=3
+HOSTNAMES="127.0.0.1"
+UCXX_ERROR_HANDLING=false
+UCXX_BLOCKING_POLLING=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -20,8 +19,8 @@ while [[ $# -gt 0 ]]; do
       PORTS="$2"
       shift 2
       ;;
-    --hostname)
-      HOSTNAME="$2"
+    --hostnames)
+      HOSTNAMES="$2"
       shift 2
       ;;
     --ucxx_error_handling)
@@ -32,20 +31,15 @@ while [[ $# -gt 0 ]]; do
       UCXX_BLOCKING_POLLING="$2"
       shift 2
       ;;
-    --gpu)
-      GPU="$2"
-      shift 2
-      ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
       echo "Options:"
       echo "  --listener_port <port>         Listener port (default: ${LISTENER_PORT})"
       echo "  --ports <port_list>            Comma-separated ports to connect to (default: ${PORTS})"
-      echo "  --hostname <hostname>          Hostname to connect to (default: ${HOSTNAME})"
+      echo "  --hostnames <hostnames>        Hostnames to connect to (default: ${HOSTNAMES})"
       echo "  --ucxx_error_handling <bool>   UCXX error handling (default: ${UCXX_ERROR_HANDLING})"
       echo "  --ucxx_blocking_polling <bool> UCXX blocking polling (default: ${UCXX_BLOCKING_POLLING})"
-      echo "  --gpu <number>                 The GPU (0-7) on which to run (default: ${GPU})"
       echo "  -h, --help                     Show this help message"
       exit 0
       ;;
@@ -62,7 +56,7 @@ IMG=communicator-run-dnb-img:latest
 echo "Starting communicator client with:"
 echo "  Listener Port: $LISTENER_PORT"
 echo "  Connect to Ports: $PORTS"
-echo "  Hostname: $HOSTNAME"
+echo "  Hostnames: $HOSTNAMES"
 echo "  UCXX Error Handling: $UCXX_ERROR_HANDLING"
 echo "  UCXX Blocking Polling: $UCXX_BLOCKING_POLLING"
 echo ""
@@ -72,25 +66,14 @@ docker run --rm -it \
     --network=host \
     --device /dev/infiniband/rdma_cm \
     --device=/dev/infiniband/uverbs0 \
-    --device=/dev/infiniband/uverbs1 \
-    --device=/dev/infiniband/uverbs2 \
-    --device=/dev/infiniband/uverbs3 \
-    --device=/dev/infiniband/uverbs4 \
-    --device=/dev/infiniband/uverbs5 \
-    --device=/dev/infiniband/uverbs6 \
-    --device=/dev/infiniband/uverbs7 \
-    --device=/dev/infiniband/uverbs8 \
-    --device=/dev/infiniband/uverbs9 \
     --cap-add=IPC_LOCK \
     --shm-size=1g \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
-    --pid host \
-    -e "CUDA_VISIBLE_DEVICES=${GPU}" \
     ${IMG} \
     --listener_port=${LISTENER_PORT} \
     --ports=${PORTS} \
-    --hostname=${HOSTNAME} \
+    --hostnames=${HOSTNAMES} \
     --ucxx_error_handling=${UCXX_ERROR_HANDLING} \
     --ucxx_blocking_polling=${UCXX_BLOCKING_POLLING}
 
