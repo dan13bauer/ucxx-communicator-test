@@ -60,7 +60,7 @@ echo "  UCXX Error Handling: $UCXX_ERROR_HANDLING"
 echo "  UCXX Blocking Polling: $UCXX_BLOCKING_POLLING"
 echo ""
 
-docker run --rm -it \
+docker run --rm -t \
     --gpus all \
     --network=host \
     --device /dev/infiniband/rdma_cm \
