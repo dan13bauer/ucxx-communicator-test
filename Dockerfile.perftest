@@ -46,8 +46,10 @@ RUN git clone --depth 1 https://github.com/openucx/ucx.git && \
                 --disable-params-check && \
     make -j$(nproc) && \
     make install && \
-    # Copy ucx_perftest binary (built but not installed by default)
-    find . -name ucx_perftest -type f -executable -exec cp {} /usr/local/bin/ \; && \
+    # Install ucx_perftest binary manually (not installed by default)
+    # Copy the actual binary from .libs directory and install to /usr/local/bin
+    cp src/tools/perf/.libs/ucx_perftest /usr/local/bin/ucx_perftest && \
+    chmod +x /usr/local/bin/ucx_perftest && \
     ldconfig && \
     cd .. && \
     rm -rf ucx
@@ -66,10 +68,20 @@ RUN git clone --depth 1 --branch branch-0.46 https://github.com/rapidsai/ucxx.gi
       -DUCXX_BENCHMARKS_ENABLE_CUDA=ON && \
     make -j$(nproc) && \
     make install && \
-    # Copy ucxx_perftest binary (built but not installed by default)
-    find . -name ucxx_perftest -type f -executable -exec cp {} /usr/local/bin/ \; && \
+    # Install ucxx_perftest binary manually (benchmarks are not installed by default)
+    cp benchmarks/ucxx_perftest /usr/local/bin/ucxx_perftest && \
+    chmod +x /usr/local/bin/ucxx_perftest && \
     cd /workspace && \
     rm -rf ucxx
+
+# Prepare RDMA libraries for runtime (copy only what exists)
+RUN mkdir -p /opt/rdma-libs && \
+    cp -r /etc/libibverbs.d /opt/rdma-libs/ 2>/dev/null || true && \
+    cp -r /usr/lib/x86_64-linux-gnu/libibverbs /opt/rdma-libs/ 2>/dev/null || true && \
+    find /usr/lib/x86_64-linux-gnu -name "lib*verbs*.so*" -exec cp {} /opt/rdma-libs/ \; 2>/dev/null || true && \
+    find /usr/lib/x86_64-linux-gnu -name "libmlx*.so*" -exec cp {} /opt/rdma-libs/ \; 2>/dev/null || true && \
+    find /usr/lib/x86_64-linux-gnu -name "libefa*.so*" -exec cp {} /opt/rdma-libs/ \; 2>/dev/null || true && \
+    find /usr/lib/x86_64-linux-gnu -name "libmana*.so*" -exec cp {} /opt/rdma-libs/ \; 2>/dev/null || true
 
 # ============================================================================
 # Stage 2: Runtime - Minimal runtime image with UCX, UCXX, and perftest binaries
@@ -84,23 +96,25 @@ RUN apt-get update && \
     libnuma1 \
     libibverbs1 \
     librdmacm1 \
-    zlib1g && \
+    zlib1g \
+    libgomp1 \
+    libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy UCX and UCXX libraries
+# Copy UCX and UCXX libraries and binaries
 COPY --from=builder /usr/local/lib /usr/local/lib
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copy perftest binaries
-COPY --from=builder /usr/local/bin/ucx_perftest /usr/local/bin/ucx_perftest
-COPY --from=builder /usr/local/bin/ucxx_perftest /usr/local/bin/ucxx_perftest
-
-# Copy InfiniBand/RDMA driver libraries
-COPY --from=builder /etc/libibverbs.d /etc/libibverbs.d
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libibverbs /usr/lib/x86_64-linux-gnu/libibverbs
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libefa.so.1.3.50.0 /usr/lib/x86_64-linux-gnu/
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libmana.so.1.0.50.0 /usr/lib/x86_64-linux-gnu/
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libmlx4.so.1.0.50.0 /usr/lib/x86_64-linux-gnu/
-COPY --from=builder /usr/lib/x86_64-linux-gnu/libmlx5.so.1.24.50.0 /usr/lib/x86_64-linux-gnu/
+# Copy pre-staged RDMA libraries and restore them to proper locations
+COPY --from=builder /opt/rdma-libs /opt/rdma-libs
+RUN if [ -d /opt/rdma-libs/libibverbs.d ]; then \
+        mkdir -p /etc && cp -r /opt/rdma-libs/libibverbs.d /etc/; \
+    fi && \
+    if [ -d /opt/rdma-libs/libibverbs ]; then \
+        mkdir -p /usr/lib/x86_64-linux-gnu && cp -r /opt/rdma-libs/libibverbs /usr/lib/x86_64-linux-gnu/; \
+    fi && \
+    find /opt/rdma-libs -name "*.so*" -exec cp {} /usr/lib/x86_64-linux-gnu/ \; 2>/dev/null || true && \
+    rm -rf /opt/rdma-libs
 
 # Update library cache
 RUN ldconfig
