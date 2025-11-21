@@ -13,6 +13,7 @@
 #include "util.h"
 #include "Communicator.h"
 #include "Receiver.h"
+#include "SumAggregator.h"
 
 DEFINE_uint32(listener_port, 4567, "Port number of the listener");
 DEFINE_string(ports, "", "Comma-separated list of port numbers to which to connect to");
@@ -104,13 +105,26 @@ int main(int argc, char** argv) {
 
   // configure a cuda memory manager.
   auto mr = createMemoryResource(FLAGS_mem_mgr);
-  rmm::cuda_stream_view stream = cudf::get_default_stream();
   if (mr) {
     rmm::mr::set_current_device_resource(mr.get());
   }
 
+  // Create a stream pool with 2 streams - one for Sender, one for Receiver
+  auto stream_pool = std::make_shared<rmm::cuda_stream_pool>(2);
+
+  // Get two separate streams - one for each module that performs CUDA operations
+  rmm::cuda_stream_view senderStream = stream_pool->get_stream();
+  rmm::cuda_stream_view receiverStream = stream_pool->get_stream();
+
+  std::cout << "Created separate CUDA streams:" << std::endl;
+  std::cout << "  Sender stream: " << senderStream.value() << std::endl;
+  std::cout << "  Receiver stream: " << receiverStream.value() << std::endl;
+
   // Setup the communicator with the listener on the given port.
   auto communicator = Communicator::initAndGet(FLAGS_listener_port);
+
+  // Set the stream for Senders created by the Acceptor
+  communicator->setSenderStream(senderStream);
   communicatorPtr = communicator;  // Fixed: Use the shared_ptr directly, don't create a new one from raw pointer
   std::signal(SIGTERM, signalHandler);
 
@@ -138,20 +152,40 @@ int main(int argc, char** argv) {
 
   uint32_t taskId = getRandomTaskId();
 
+  // Vector to hold aggregators for each receiver
+  std::vector<std::shared_ptr<SumAggregator>> aggregators;
+
   for (size_t i = 0; i < portsVec.size(); ++i) {
     // create and start a receiver using corresponding hostname and port
     std::cout << "Creating receiver from taskId " << taskId
               << " for " << hostnamesVec[i] << ":" << portsVec[i] << std::endl;
     std::shared_ptr<Receiver> recv =
-        Receiver::create(communicator, hostnamesVec[i], portsVec[i], taskId);
+        Receiver::create(communicator, hostnamesVec[i], portsVec[i], taskId, receiverStream);
     receivers.push_back(recv);
     communicator->registerCommElement(receivers.back());
+
+    // Create and start a SumAggregator for this receiver
+    auto aggregator = std::make_shared<SumAggregator>(recv);
+    aggregator->start();
+    aggregators.push_back(aggregator);
+    std::cout << "Started SumAggregator for receiver " << i << std::endl;
+
     taskId++;
   }
 
   // Communicator will stop when the last communication element is finished
   // and has de-registered itself. Join in the thread.
   commThread.join();
+
+  // Stop all aggregators and display final results
+  std::cout << "\n=== Stopping SumAggregators ===" << std::endl;
+  for (size_t i = 0; i < aggregators.size(); ++i) {
+    aggregators[i]->stop();
+    std::cout << "Receiver " << i << " - Final sum: "
+              << aggregators[i]->getCumulativeSum()
+              << ", Chunks processed: "
+              << aggregators[i]->getChunksProcessed() << std::endl;
+  }
 
   if (receivers.size() == 0) {
     return 0;

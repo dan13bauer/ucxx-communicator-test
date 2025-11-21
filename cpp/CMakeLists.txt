@@ -11,7 +11,8 @@ function(BuildRule EXECUTABLE)
             ucp
             ucs
             fmt
-            gflags)
+            gflags
+            CUDA::cudart)
 endfunction()
 
 buildrule(
@@ -22,6 +23,7 @@ buildrule(
   EndpointRef.cpp
   Sender.cpp
   Receiver.cpp
+  SumAggregator.cpp
   protocol.cpp
   util.cpp
   StateTransitionMetrics.cpp)

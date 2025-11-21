@@ -15,7 +15,8 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
       const std::shared_ptr<Communicator> communicator,
       std::shared_ptr<EndpointRef> endpointRef,
       const std::string& key,
-      uint64_t initialValue);
+      uint64_t initialValue,
+      rmm::cuda_stream_view stream);
 
   void process() override;
 
@@ -42,7 +43,8 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
       const std::shared_ptr<Communicator> communicator,
       std::shared_ptr<EndpointRef> endpointRef,
       const std::string& key,
-      uint64_t initialValue);
+      uint64_t initialValue,
+      rmm::cuda_stream_view stream);
 
   /// @return A shared pointer to itself.
   std::shared_ptr<Sender> getSelfPtr();
@@ -114,13 +116,27 @@ class Sender : public CommElement, public std::enable_shared_from_this<Sender> {
       lastStateChangeTime_{std::chrono::high_resolution_clock::now()};
 
   // For testing only:
+  /// @brief Creates the cudf::table once with initialized data
+  void createTable(
+      std::size_t numRows,
+      uint64_t initialValue,
+      rmm::device_async_resource_ref mr =
+          cudf::get_current_device_resource_ref());
+
+  /// @brief Packs the table into cudf::packed_columns (can be called multiple times)
+  std::unique_ptr<cudf::packed_columns> packTable();
+
+  /// @brief Legacy method - kept for compatibility but now split into createTable + packTable
   std::unique_ptr<cudf::packed_columns> makePackedColumns(
       std::size_t numRows,
       uint64_t initialValue,
-      rmm::cuda_stream_view stream = cudf::get_default_stream(),
       rmm::device_async_resource_ref mr =
           cudf::get_current_device_resource_ref());
 
   uint32_t numExchanges_;
   uint64_t initialValue_;
+  rmm::cuda_stream_view stream_;
+
+  // Table created once and reused for multiple packed_columns
+  std::unique_ptr<cudf::table> table_;
 };

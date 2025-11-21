@@ -4,6 +4,7 @@
 #include <sstream>
 #include "protocol.h"
 #include "Communicator.h"
+#include <nvtx3/nvToolsExt.h>
 
 
 // This constructor is private.
@@ -11,13 +12,15 @@ Receiver::Receiver(
     const std::shared_ptr<Communicator> communicator,
     const std::string& host,
     uint16_t port,
-    const uint32_t receiverId)
+    const uint32_t receiverId,
+    rmm::cuda_stream_view stream)
     : CommElement(communicator),
       host_(host),
       port_(port),
       key_("receiver_" + std::to_string(receiverId)),
       initialValue_(receiverId),
-      taskIdHash_(fnv1a_32(key_)) {
+      taskIdHash_(fnv1a_32(key_)),
+      stream_(stream) {
         setState(ReceiverState::Created);
       }
 
@@ -26,9 +29,10 @@ std::shared_ptr<Receiver> Receiver::create(
     const std::shared_ptr<Communicator> communicator,
     const std::string& host,
     uint16_t port,
-    const uint32_t receiverId) {
+    const uint32_t receiverId,
+    rmm::cuda_stream_view stream) {
   auto ptr = std::shared_ptr<Receiver>(
-      new Receiver(communicator, host, port, receiverId));
+      new Receiver(communicator, host, port, receiverId, stream));
   return ptr;
 }
 
@@ -197,6 +201,9 @@ void Receiver::getMetadata() {
 }
 
 void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
+  std::string rangeName = fmt::format("Data recv [{}]", sequenceNumber_);
+    nvtxRangePushA(rangeName.c_str());
+
   if (status != UCS_OK) {
     std::string errorMsg = fmt::format(
         "Failed to receive metadata from host {}:{}, task {}: {}",
@@ -219,25 +226,35 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
     ptr->metadata =
         std::move(MetadataMsg::deserializeMetadataMsg(metadataMsg->data()));
 
+    std::cout << toString() << " onMetadata: seq=" << this->sequenceNumber_
+              << ", metadata size=" << (ptr->metadata.cudfMetadata ? ptr->metadata.cudfMetadata->size() : -1)
+              << std::endl;
+
+
     if (ptr->metadata.atEnd) {
       // It seems that all data has been transferred
       atEnd_ = true;
       std::cout << "There is no more data to transfer for " << toString()
                 << std::endl;
+
+      // Enqueue nullptr as a stop signal for the SumAggregator
+      dataQueue_.push(nullptr);
+      std::cout << toString() << " Enqueued nullptr as stop signal" << std::endl;
+
       // Let the statement decide the final action
       setStateIf(ReceiverState::WaitingForMetadata, ReceiverState::Done);
       communicator_->addToWorkQueue(getSelfPtr());
+      nvtxRangePop();
       // jump out of this function.
       return;
     }
 
     // Now allocate memory for the CudaVector
-    // Get a stream from the global stream pool
+    // Use the dedicated stream for this receiver
 
-    auto stream = cudf::get_default_stream();
     try {
       ptr->dataBuf = std::make_unique<rmm::device_buffer>(
-          ptr->metadata.dataSizeBytes, stream);
+          ptr->metadata.dataSizeBytes, stream_);
     } catch (const rmm::bad_alloc& e) {
       std::cerr << "!!! RMM bad_alloc: " << e.what() << "\n";
       setState(ReceiverState::Done);
@@ -248,7 +265,7 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
     }
 
     // sync after allocating.
-    stream.synchronize();
+    stream_.synchronize();
 
     // Initiate the transfer of the actual data from GPU-2-GPU
     uint64_t dataTag = getDataTag(taskIdHash_, sequenceNumber_);
@@ -258,6 +275,10 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
       std::cerr << "onMetadata Invalid previous state " << std::endl;
       return;
     }
+
+    std::cout << "Received metadata with size: " << ptr->metadata.dataSizeBytes << std::endl;
+    std::cout << "Received metadata atEnd: " << ptr->metadata.atEnd << std::endl;
+
     request_ = endpointRef_->endpoint_->tagRecv(
         ptr->dataBuf->data(),
         ptr->metadata.dataSizeBytes,
@@ -275,6 +296,7 @@ void Receiver::onMetadata(ucs_status_t status, std::shared_ptr<void> arg) {
 }
 
 void Receiver::onData(ucs_status_t status, std::shared_ptr<void> arg) {
+  nvtxRangePop();
   if (status != UCS_OK) {
     std::string errorMsg = fmt::format(
         "Failed to receive data from host {}:{}, task {}: {}",
@@ -287,8 +309,19 @@ void Receiver::onData(ucs_status_t status, std::shared_ptr<void> arg) {
   } else {
     this->sequenceNumber_++;
 
-    std::shared_ptr<DataAndMetadata> ptr =
+    auto ptr =
         std::static_pointer_cast<DataAndMetadata>(arg);
+
+    std::cout << toString() << " onData: seq=" << this->sequenceNumber_
+              << ", metadata size=" << (ptr->metadata.cudfMetadata ? ptr->metadata.cudfMetadata->size() : -1)
+              << ", buffer size=" << ptr->dataBuf->size()
+              << ", data size=" << ptr->metadata.dataSizeBytes << std::endl;
+
+    std::unique_ptr<cudf::packed_columns> columns =
+      std::make_unique<cudf::packed_columns>(
+          std::move(ptr->metadata.cudfMetadata), std::move(ptr->dataBuf));
+    // Enqueue with the current sequence number (already incremented above)
+    enqueue(std::move(columns), std::move(ptr->metadata), this->sequenceNumber_);
 
     // Record transition with bytes received
     setStateIf(
@@ -328,6 +361,22 @@ bool Receiver::setStateIf(
   lastStateChangeTime_ = endTime;
 
   return true;
+}
+
+void Receiver::enqueue(std::unique_ptr<cudf::packed_columns> columns,
+                       MetadataMsg&& metadata,
+                       uint32_t sequenceNumber) {
+  // Create a shared pointer to ReceivedData
+  auto receivedData = std::make_shared<ReceivedData>(
+      std::move(columns),
+      std::move(metadata),
+      sequenceNumber);
+
+  // Push to the thread-safe queue
+  dataQueue_.push(receivedData);
+
+  std::cout << toString() << " Enqueued data chunk " << sequenceNumber
+            << " (queue size: " << dataQueue_.size() << ")" << std::endl;
 }
 
 

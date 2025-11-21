@@ -8,15 +8,31 @@
 #include "CommElement.h"
 #include "EndpointRef.h"
 #include "StateTransitionMetrics.h"
+#include "WorkQueue.h"
 
 class Receiver : public CommElement,
                  public std::enable_shared_from_this<Receiver> {
  public:
+  /// @brief Structure to hold received cudf data for processing
+  struct ReceivedData {
+    std::unique_ptr<cudf::packed_columns> columns;
+    MetadataMsg metadata;
+    uint32_t sequenceNumber;
+
+    ReceivedData(std::unique_ptr<cudf::packed_columns> cols,
+                 MetadataMsg&& meta,
+                 uint32_t seqNum)
+        : columns(std::move(cols)),
+          metadata(std::move(meta)),
+          sequenceNumber(seqNum) {}
+  };
+
   static std::shared_ptr<Receiver> create(
       const std::shared_ptr<Communicator> communicator,
       const std::string& host,
       uint16_t port,
-      const uint32_t receiverId);
+      const uint32_t receiverId,
+      rmm::cuda_stream_view stream);
 
   void process() override;
 
@@ -27,6 +43,26 @@ class Receiver : public CommElement,
   /// @return Reference to the state transition metrics.
   const StateTransitionMetrics& getStateTransitionMetrics() const {
     return receiverMetrics_;
+  }
+
+  /// @brief Get access to the data queue for processing by worker threads
+  /// Example usage from a worker thread:
+  ///   while (running) {
+  ///     auto data = receiver->getDataQueue().pop();
+  ///     if (data) {
+  ///       // Process data->columns (cudf::packed_columns)
+  ///       // Access data->metadata and data->sequenceNumber as needed
+  ///     } else {
+  ///       // Queue is empty, sleep or wait
+  ///     }
+  ///   }
+  WorkQueue<ReceivedData>& getDataQueue() {
+    return dataQueue_;
+  }
+
+  /// @brief Check if there is data available in the queue
+  bool hasDataAvailable() const {
+    return !dataQueue_.empty();
   }
 
  private:
@@ -62,7 +98,8 @@ class Receiver : public CommElement,
       const std::shared_ptr<Communicator> communicator,
       const std::string& host,
       uint16_t port,
-      const uint32_t receiverId);
+      const uint32_t receiverId,
+      rmm::cuda_stream_view stream);
 
   /// @return A shared pointer to itself.
   std::shared_ptr<Receiver> getSelfPtr();
@@ -143,6 +180,14 @@ class Receiver : public CommElement,
       std::unique_ptr<cudf::packed_columns> columns,
       MetadataMsg& metadata);
 
+  /// @brief Enqueue received data for processing by worker threads
+  /// @param columns The packed cudf columns received
+  /// @param metadata The metadata associated with the columns (moved)
+  /// @param sequenceNumber The sequence number of this data chunk
+  void enqueue(std::unique_ptr<cudf::packed_columns> columns,
+               MetadataMsg&& metadata,
+               uint32_t sequenceNumber);
+
   // The connection parameters
   const std::string host_;
   uint16_t port_;
@@ -168,4 +213,9 @@ class Receiver : public CommElement,
   // NOTE: The request owns/holds a reference to the upcall function
   // and must therefore exist until the upcall is done.
   std::shared_ptr<ucxx::Request> request_{nullptr};
+
+  rmm::cuda_stream_view stream_;
+
+  // Thread-safe queue for received data that can be processed by worker threads
+  WorkQueue<ReceivedData> dataQueue_;
 };

@@ -3,7 +3,9 @@
 IMG=communicator-dev-dnb-img:latest
 NAME=communicator-dev-dnb
 
-docker run -d --rm -it --gpus all  --network=host --device /dev/infiniband/rdma_cm  \
+docker run -d --rm -it --gpus all  \
+       --privileged \
+       --network=host --device /dev/infiniband/rdma_cm  \
        --device=/dev/infiniband/uverbs0 --device=/dev/infiniband/uverbs1 \
        --device=/dev/infiniband/uverbs2 --device=/dev/infiniband/uverbs3 \
        --device=/dev/infiniband/uverbs4 --device=/dev/infiniband/uverbs5 \
@@ -17,5 +19,6 @@ docker run -d --rm -it --gpus all  --network=host --device /dev/infiniband/rdma_
        --name ${NAME} \
        --entrypoint='' \
        -v /gpfs/zc2/u/dnb/ucxx-communicator-test:/workspace/ucxx-communicator-test \
+       -v /opt:/opt \
        ${IMG} \
        tail -f /dev/null

@@ -37,6 +37,14 @@ std::shared_ptr<Communicator> Communicator::getInstance() {
   return instancePtr_;
 }
 
+void Communicator::setSenderStream(rmm::cuda_stream_view stream) {
+  senderStream_ = stream;
+}
+
+rmm::cuda_stream_view Communicator::getSenderStream() const {
+  return senderStream_;
+}
+
 /* static */ void Communicator::cStyleListenerCallback(
     ucp_conn_request_h conn_request,
     void* arg) {

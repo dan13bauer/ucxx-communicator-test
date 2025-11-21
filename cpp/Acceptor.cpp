@@ -29,7 +29,8 @@ void Acceptor::cStyleAMCallback(
       communicator,
       epRef,
       std::string(handshakePtr->key),
-      handshakePtr->initialValue);
+      handshakePtr->initialValue,
+      communicator->getSenderStream());
 
   // Add this sender to the endpoint reference.
   epRef->addCommElem(sender);

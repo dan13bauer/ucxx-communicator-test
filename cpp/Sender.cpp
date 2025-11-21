@@ -16,12 +16,14 @@ Sender::Sender(
     std::shared_ptr<Communicator> communicator,
     std::shared_ptr<EndpointRef> endpointRef,
     const std::string& key,
-    uint64_t initialValue)
+    uint64_t initialValue,
+    rmm::cuda_stream_view stream)
     : CommElement(communicator, endpointRef),
       key_(key),
       keyHash_(fnv1a_32(key)),
       numExchanges_(FLAGS_num_chunks),
-      initialValue_(initialValue) {
+      initialValue_(initialValue),
+      stream_(stream) {
           setState(ServerState::Created);
       }
 
@@ -30,26 +32,30 @@ std::shared_ptr<Sender> Sender::create(
     const std::shared_ptr<Communicator> communicator,
     std::shared_ptr<EndpointRef> endpointRef,
     const std::string& key,
-    uint64_t initialValue) {
+    uint64_t initialValue,
+    rmm::cuda_stream_view stream) {
   auto ptr = std::shared_ptr<Sender>(
-      new Sender(communicator, endpointRef, key, initialValue));
+      new Sender(communicator, endpointRef, key, initialValue, stream));
   return ptr;
 }
 
 void Sender::process() {
   switch (state_) {
     case ServerState::Created:
-      // Allocate the packed columns structure once
-      dataPtr_ = makePackedColumns(FLAGS_rows, initialValue_);
+      // Create the cudf::table once with initialized data
+      createTable(FLAGS_rows, initialValue_);
       setState(ServerState::ReadyToTransfer);
       communicator_->addToWorkQueue(getSelfPtr());
       break;
     case ServerState::ReadyToTransfer:
       setState(ServerState::WaitingForDataFromQueue);
 
-      // Reuse the same dataPtr_ until we reach the end
+      // Pack the table into packed_columns for each send, or signal end
       if (sequenceNumber_ >= numExchanges_) {
         dataPtr_ = nullptr; // signal that we are at the end.
+      } else {
+        // Pack the existing table (metadata is regenerated each time)
+        dataPtr_ = packTable();
       }
       this->setState(ServerState::DataReady);
       communicator_->addToWorkQueue(getSelfPtr());
@@ -103,7 +109,8 @@ void Sender::sendData() {
   std::shared_ptr<MetadataMsg> metadataMsg = std::make_shared<MetadataMsg>();
 
   if (dataPtr_) {
-    metadataMsg->cudfMetadata = std::move(dataPtr_->metadata);
+    // Copy the metadata vector into a new unique_ptr (can't assign unique_ptr)
+    metadataMsg->cudfMetadata = std::make_unique<std::vector<uint8_t>>(*dataPtr_->metadata);
     metadataMsg->dataSizeBytes = dataPtr_->gpu_data->size();
     metadataMsg->remainingBytes = {};
     metadataMsg->atEnd = false;
@@ -114,6 +121,8 @@ void Sender::sendData() {
     metadataMsg->remainingBytes = {};
     metadataMsg->atEnd = true;
   }
+
+  std::cout << "Sending metadata of size: " << metadataMsg->dataSizeBytes << std::endl;
 
   auto [serializedMetadata, serMetaSize] = metadataMsg->serialize();
 
@@ -194,17 +203,16 @@ void Sender::sendComplete(
 
 // ---- for testing only ---
 
-std::unique_ptr<cudf::packed_columns> Sender::makePackedColumns(
+void Sender::createTable(
     std::size_t numRows,
     uint64_t initialValue,
-    rmm::cuda_stream_view stream,
     rmm::device_async_resource_ref mr) {
   // Create a numeric column using cudf::make_numeric_column
   auto counterCol = cudf::make_numeric_column(
       cudf::data_type{cudf::type_id::INT64},
       numRows,
       cudf::mask_state::UNALLOCATED, // no nulls.
-      stream,
+      stream_,
       mr);
 
   // fill with some recognizable data.
@@ -222,17 +230,32 @@ std::unique_ptr<cudf::packed_columns> Sender::makePackedColumns(
       vec1.size() * sizeof(uint64_t),
       cudaMemcpyHostToDevice);
 
-  // Build cudf::table
+  // Build cudf::table and store it for reuse
   std::vector<std::unique_ptr<cudf::column>> columns;
   columns.push_back(std::move(counterCol));
-  auto table = std::make_unique<cudf::table>(std::move(columns));
+  table_ = std::make_unique<cudf::table>(std::move(columns));
 
-  cudf::packed_columns packed = cudf::pack(table->view());
+  // sync the stream after table creation
+  stream_.synchronize();
+}
+
+std::unique_ptr<cudf::packed_columns> Sender::packTable() {
+  // Pack the existing table (can be called multiple times)
+  cudf::packed_columns packed = cudf::pack(table_->view());
 
   // sync the stream before giving the packed columns to UCX since UCX
   // is not stream aware.
-  stream.synchronize();
+  stream_.synchronize();
 
   return std::unique_ptr<cudf::packed_columns>(new cudf::packed_columns(
       std::move(packed.metadata), std::move(packed.gpu_data)));
+}
+
+std::unique_ptr<cudf::packed_columns> Sender::makePackedColumns(
+    std::size_t numRows,
+    uint64_t initialValue,
+    rmm::device_async_resource_ref mr) {
+  // Legacy method - now implemented using createTable + packTable
+  createTable(numRows, initialValue, mr);
+  return packTable();
 }

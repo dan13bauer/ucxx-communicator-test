@@ -41,6 +41,12 @@ class Communicator {
   /// @brief Method to get the Communicator reference
   static std::shared_ptr<Communicator> getInstance();
 
+  /// @brief Set the stream to be used for Senders created by Acceptor
+  void setSenderStream(rmm::cuda_stream_view stream);
+
+  /// @brief Get the stream to be used for Senders created by Acceptor
+  rmm::cuda_stream_view getSenderStream() const;
+
   /// @brief Destructor.
   ~Communicator();
 
@@ -129,4 +135,7 @@ class Communicator {
 
   // The map that maintains the shared endpoints.
   std::map<HostPort, std::shared_ptr<EndpointRef>> endpoints_;
+
+  // Stream to be used for Senders created by the Acceptor
+  rmm::cuda_stream_view senderStream_{rmm::cuda_stream_view{}};
 };
