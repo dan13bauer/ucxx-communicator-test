@@ -53,78 +53,84 @@ client
 
 ## Running with Docker Scripts
 
-The repository includes convenience scripts to run the communicator inside Docker containers with proper GPU and InfiniBand device access.
+The repository includes convenience scripts to run the communicator inside Docker containers with proper GPU and InfiniBand device access. There are two sets of scripts for different environments.
 
-### Server Script
+### Small Scripts (AWS Single-GPU Systems)
 
-The `run_comms_server.sh` script starts a communicator server that listens for incoming connections and generates data to send.
+The `small_server.sh` and `small_client.sh` scripts are designed for single-GPU AWS instances using SDR (Scalable Reliable Datagram). They disable blocking polling and error handling for SDR compatibility.
 
-**Default configuration:**
-- Listener port: 4567
-- Number of chunks: 10
-- Rows per chunk: 10000000
-- UCXX error handling: enabled
-- UCXX blocking polling: enabled
+**small_server.sh** - Starts a server that listens for connections and sends data.
 
-**Usage:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listener_port` | 4567 | Port to listen on |
+| `--num_chunks` | 10 | Number of data chunks to send |
+| `--rows` | 134217728 | Number of rows per chunk |
+| `--ucxx_error_handling` | false | UCXX error handling (disabled for SDR) |
+| `--ucxx_blocking_polling` | false | Blocking polling (disabled for SDR) |
+
+**small_client.sh** - Starts a client that connects to a server and receives data.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listener_port` | 0 | Port to listen on (0 = no listener) |
+| `--ports` | 4567 | Comma-separated server ports to connect to |
+| `--hostnames` | 127.0.0.1 | Server hostname(s) |
+| `--ucxx_error_handling` | false | UCXX error handling (disabled for SDR) |
+| `--ucxx_blocking_polling` | false | Blocking polling (disabled for SDR) |
+
+**Example on AWS:**
 ```bash
-# Run with defaults
-./run_comms_server.sh
+# Terminal 1 (Server)
+./small_server.sh --listener_port 4567 --num_chunks 10
 
-# Run with custom parameters
-./run_comms_server.sh --listener_port 5000 --num_chunks 20 --rows 5000000
-
-# Show help
-./run_comms_server.sh --help
+# Terminal 2 (Client)
+./small_client.sh --ports 4567 --hostnames 127.0.0.1
 ```
 
-**Available options:**
-- `--listener_port <port>` - Port to listen on (default: 4567)
-- `--num_chunks <number>` - Number of data chunks to send (default: 10)
-- `--rows <number>` - Number of rows per chunk (default: 10000000)
-- `--ucxx_error_handling <bool>` - Enable UCXX error handling (default: true)
-- `--ucxx_blocking_polling <bool>` - Use blocking polling mode (default: true)
+### Big Scripts (8-way A100 Systems like "sally")
 
-### Client Script
+The `big_server.sh` and `big_client.sh` scripts are designed for multi-GPU systems with full InfiniBand support (e.g., 8-way A100 systems). They enable full UCX features including blocking polling and error handling, and allow GPU selection.
 
-The `run_comms_client.sh` script starts a communicator client that connects to a server and receives data.
+**big_server.sh** - Starts a server on a specific GPU.
 
-**Default configuration:**
-- Listener port: 4568
-- Connect to ports: 4567
-- Hostname: 127.0.0.1
-- UCXX error handling: enabled
-- UCXX blocking polling: enabled
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listener_port` | 4567 | Port to listen on |
+| `--num_chunks` | 100 | Number of data chunks to send |
+| `--rows` | 16777216 | Number of rows per chunk |
+| `--gpu` | 7 | GPU index (0-7) to run on |
+| `--ucxx_error_handling` | true | UCXX error handling |
+| `--ucxx_blocking_polling` | true | Blocking polling mode |
 
-**Usage:**
+**big_client.sh** - Starts a client on a specific GPU.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--listener_port` | 0 | Port to listen on (0 = no listener) |
+| `--ports` | 4567 | Comma-separated server ports to connect to |
+| `--hostnames` | 127.0.0.1 | Server hostname(s) |
+| `--gpu` | 3 | GPU index (0-7) to run on |
+| `--ucxx_error_handling` | true | UCXX error handling |
+| `--ucxx_blocking_polling` | true | Blocking polling mode |
+
+**Example on 8-way A100:**
 ```bash
-# Run with defaults (connects to server on port 4567)
-./run_comms_client.sh
+# Terminal 1 (Server on GPU 7)
+./big_server.sh --listener_port 4567 --gpu 7
 
-# Run with custom parameters
-./run_comms_client.sh --ports "4567,4568,4569" --hostname "192.168.1.100"
-
-# Show help
-./run_comms_client.sh --help
+# Terminal 2 (Client on GPU 3)
+./big_client.sh --ports 4567 --gpu 3
 ```
 
-**Available options:**
-- `--listener_port <port>` - Port to listen on (default: 4568)
-- `--ports <port_list>` - Comma-separated list of server ports to connect to (default: "4567")
-- `--hostname <hostname>` - Hostname/IP of the server to connect to (default: "127.0.0.1")
-- `--ucxx_error_handling <bool>` - Enable UCXX error handling (default: true)
-- `--ucxx_blocking_polling <bool>` - Use blocking polling mode (default: true)
+### Key Differences
 
-### Example: Running Server and Client
+| Feature | Small Scripts (AWS/SDR) | Big Scripts (8-way A100) |
+|---------|------------------------|--------------------------|
+| Target system | Single-GPU AWS instances | Multi-GPU systems (sally) |
+| InfiniBand devices | uverbs0 only | uverbs0-9 |
+| Error handling | Disabled | Enabled |
+| Blocking polling | Disabled | Enabled |
+| GPU selection | Not available | `--gpu` option (0-7) |
 
-**Terminal 1 (Server):**
-```bash
-./run_comms_server.sh --listener_port 4567 --num_chunks 10
-```
-
-**Terminal 2 (Client):**
-```bash
-./run_comms_client.sh --ports 4567 --listener_port 4568
-```
-
-The client will connect to the server on port 4567 and receive the data chunks. Both containers run with full GPU and InfiniBand device access for high-performance RDMA communication.
+All scripts support `--help` for full option documentation.
